@@ -109,10 +109,22 @@ STATE_BITS = {
 
 
 def _point_byte(decimals: int) -> int:
-    """byte6 value for a `decimals`-place display (inverse of the first-set-bit
-    decode). point N -> 1 << (3 - N) for N in 1..3; 0 for N == 0."""
+    """byte6 value for a `decimals`-place display.
+
+    APP-TRUE encoding (decompiled ``handleReceivedData_B35``): the real OWON BLE4.0
+    Android app reads byte6 as an **ASCII digit**, NOT a bitmask:
+        byte6 == '1' (0x31) -> 3 decimals (X.XXX)
+        byte6 == '2' (0x32) -> 2 decimals (XX.XX)
+        byte6 == '4' (0x34) -> 1 decimal  (XXX.X)
+        anything else        -> 0 decimals (XXXX)   (we emit '0' = 0x30)
+    The driver-repo decoder ``owon-old.ts`` instead reads byte6 as a first-set-bit
+    BITMASK (1/2/4 as raw values) — that disagrees with the real meter and is a
+    DRIVER bug surfaced by this validation (flagged in docs/PROGRESS.md). We encode
+    the app-true ASCII byte so the OWON app renders the decimal point correctly; the
+    bundled oracle decodes byte6 the same (app-true) way to keep the round-trip honest.
+    """
     n = max(0, min(MAX_POINT, decimals))
-    return 0 if n == 0 else (1 << (3 - n))
+    return {3: 0x31, 2: 0x32, 1: 0x34, 0: 0x30}[n]
 
 
 def _digits_field(magnitude: int) -> bytes:

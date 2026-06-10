@@ -17,7 +17,7 @@ itself in ``profiles/__init__.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,12 @@ class Profile:
     # GATT
     service_uuid: str
     notify_uuid: str
-    write_uuid: str
+    # The write characteristic UUID(s). A single string for most families, or a LIST
+    # when the family exposes several interchangeable write chars (UNI-T's ISSC service
+    # exposes both ``…8841…`` and ``…6daa…``; the Smart Measure app prefers ``…6daa…``).
+    # The server adds one write characteristic per UUID, all dispatching to the same
+    # command handler / write logger. ``write_uuids`` normalises this to a list.
+    write_uuid: Union[str, List[str]]
     # Optional FFF1-style auth/"secure" characteristic. None if the family has none.
     secure_uuid: Optional[str] = None
     # Optional FFF2-style "info" characteristic. Many OWON-family apps READ this on
@@ -170,6 +175,17 @@ class Profile:
     # current_frame(). None => no per-tick animation (a fixed reading is streamed).
     tick: Optional[Callable[[], None]] = None
 
+    # start hook: called ONCE by the server after the notify characteristic is live
+    # (post-publish / -resolve), handed the server's thread-safe push callback
+    # (``MeterServer.notify``). A 'polled' family (UNI-T AB-CD handshake-then-stream)
+    # uses it so its ``tick`` can SELF-PUSH the periodic measurement frames once the
+    # app's GET_DATA write arms the stream — in polled mode the server's stream loop is
+    # off and the profile otherwise has no reference to ``notify``. When a profile
+    # self-pushes via this callback, the server's polled tick driver must NOT also push
+    # ``current_frame`` (avoid a double-push — see gatt_server._polled_tick).
+    # None => the server does not hand the profile a push fn (stream profiles).
+    on_start: Optional[Callable[[Callable[[bytes], None]], None]] = None
+
     # ---- optional REPL/control hooks (so the controller stays profile-agnostic) ----
     # The controller (``__main__``) calls these by capability, NOT by profile id, so
     # every profile that maintains interactive state plugs in without the controller
@@ -192,3 +208,10 @@ class Profile:
     # function_codes: the function labels this profile's encoder accepts, surfaced by
     # the REPL `v` prompt. None/empty => the REPL shows no function hint.
     function_codes: Optional[list] = None
+
+    @property
+    def write_uuids(self) -> List[str]:
+        """The write characteristic UUID(s) as a list (single-string back-compat)."""
+        if isinstance(self.write_uuid, str):
+            return [self.write_uuid]
+        return list(self.write_uuid)

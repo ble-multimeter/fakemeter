@@ -42,11 +42,13 @@ def decode_owon_old(frame: bytes) -> Decoded:
 
     text = "-" if frame[0] == SIGN_MINUS else ""
 
-    # Decimal-point: (byte6 & 0x07) as a 4-bit field; index of first set bit.
-    point_bits = format(frame[6] & 0x07, "04b")
-    point = point_bits.find("1")
-    if point < 0:
-        point = 0
+    # Decimal-point — APP-TRUE decode (decompiled handleReceivedData_B35): byte6 is
+    # an ASCII digit selecting the #decimals, NOT the driver's first-set-bit bitmask.
+    #   byte6 == '1' (0x31) -> 3 dp ; '2' (0x32) -> 2 dp ; '4' (0x34) -> 1 dp ; else 0.
+    # (owon-old.ts decodes byte6 as a bitmask, which disagrees with the real meter —
+    # a driver bug surfaced by the live validation. This oracle matches the APP so the
+    # encoder round-trip is against app-true behaviour.)
+    point = {0x31: 3, 0x32: 2, 0x34: 1}.get(frame[6], 0)
 
     digits = bytes(frame[1:5]).decode("latin-1")
     overload = digits.startswith("?") and digits.endswith("?")

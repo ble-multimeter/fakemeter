@@ -51,10 +51,13 @@ def test_flag_roundtrip(flag):
     assert decode_ut219p(ut219p.encode(r)).flags[flag] is True
 
 
-def test_live_poll_returns_measurement():
+def test_live_poll_arms_stream_and_returns_first_measurement():
     # LIVE_STD poll: AB CD 00 04 05 00 09 00 (cmd 0x05 = get_data_op).
+    # Handshake-then-stream: the poll ARMS streaming.
+    ut219p._METER.stop_stream()
     resp = ut219p.command(bytes([0xab, 0xcd, 0x00, 0x04, 0x05, 0x00, 0x09, 0x00]))
     assert resp is not None and checksum_ok(resp)
+    assert ut219p._METER.streaming is True
 
 
 def test_profile_polled():

@@ -224,3 +224,27 @@ def test_reading_has_full_driver_flag_surface():
     for name in ("max", "min", "hold", "rel", "auto", "low_battery",
                  "hv_warning", "peak_max", "peak_min"):
         assert hasattr(r, name), f"Reading missing flag {name}"
+
+
+def test_profile_write_uuids_normalizes_str_and_list():
+    # write_uuid accepts a single string (back-compat) or a list; write_uuids always
+    # returns a list, so the GATT server can add one write characteristic per UUID.
+    from fakemeter.profiles.base import Profile
+
+    single = Profile(id="s", label="S", service_uuid="svc",
+                     notify_uuid="ntf", write_uuid="w1")
+    assert single.write_uuids == ["w1"]
+
+    multi = Profile(id="m", label="M", service_uuid="svc",
+                    notify_uuid="ntf", write_uuid=["w1", "w2"])
+    assert multi.write_uuids == ["w1", "w2"]
+
+
+def test_profile_on_start_field_default_none():
+    # on_start is an optional Profile field (the polled handshake-then-stream seam);
+    # default None means the server hands no push fn (stream families).
+    from fakemeter.profiles.base import Profile
+
+    p = Profile(id="p", label="P", service_uuid="svc",
+                notify_uuid="ntf", write_uuid="w")
+    assert p.on_start is None

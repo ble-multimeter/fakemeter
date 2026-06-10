@@ -44,7 +44,7 @@ def _print_banner(server: MeterServer) -> None:
     print(f"  name    : {server.local_name}   <- connect to THIS on the phone")
     print(f"  service : {p.service_uuid}")
     print(f"  notify  : {p.notify_uuid}")
-    print(f"  write   : {p.write_uuid}")
+    print(f"  write   : {', '.join(p.write_uuids)}")
     if p.secure_uuid:
         print(f"  secure  : {p.secure_uuid}  (FFF1 MD5 auth gate — auto-answered)")
     print("=" * 64)
@@ -94,6 +94,20 @@ class Controller:
             frame = self.profile.encode(r)
         self.server.notify(frame)
         self._describe(r, frame)
+
+    def _send_initial(self) -> None:
+        """Push the very first frame WITHOUT overriding the profile's own initial
+        reading. The controller's default ``self.reading`` uses generic function
+        labels (e.g. ``V_DC``) that not every family's encoder accepts (UNI-T uses
+        ``DCV``); a profile that owns its interactive state already starts on a valid
+        reading, so seed from ``current_frame()`` and adopt that reading. Falls back
+        to the normal ``send()`` for profiles without interactive state."""
+        if self.profile.current_frame is not None:
+            frame = self.profile.current_frame()
+            self.server.notify(frame)
+            print(f"  -> sent {frame.hex()}   [initial reading from profile]")
+        else:
+            self.send()
 
     def _describe(self, r: Reading, frame: bytes) -> None:
         if r.overload:
@@ -245,7 +259,7 @@ class Controller:
 
     def loop(self) -> None:
         _menu()
-        self.send()  # push an initial frame so the phone shows something
+        self._send_initial()  # push an initial frame so the phone shows something
         while True:
             try:
                 cmd = input("fakemeter> ").strip().lower()
@@ -356,6 +370,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-walk", action="store_true",
                     help="disable the demo value-walk; stream a fixed reading "
                          "(useful for precise byte-mapping)")
+    ap.add_argument("--no-unsolicited", action="store_true",
+                    help="disable no-CCCD (unsolicited) notification injection. By "
+                         "default, stream profiles inject ATT notifications via a raw "
+                         "HCI socket to clients that connect without writing the FFF4 "
+                         "CCCD (e.g. the OWON Java app), so they still get live data. "
+                         "Needs CAP_NET_RAW to deliver; the normal CCCD path is "
+                         "unaffected either way.")
     ap.add_argument("--self-check", action="store_true",
                     help="publish, verify advertisement+GATT registration, exit")
     ap.add_argument("-v", "--verbose", action="store_true",
@@ -381,7 +402,8 @@ def main(argv=None) -> int:
         return _self_check(args)
 
     server = MeterServer(prof, adapter_id=args.adapter,
-                         local_name=args.name or prof.default_name)
+                         local_name=args.name or prof.default_name,
+                         unsolicited=not args.no_unsolicited)
     server.start()
     _print_banner(server)
     Controller(server).loop()

@@ -31,10 +31,15 @@ def test_frame_is_19_bytes_with_header():
 
 
 def test_matches_real_fixture():
-    # The driver test's real UT60BT capture: ACV 274.7 V, auto-ranging.
+    # ACV 274.7 V, auto-ranging. byte[4] = 0x31 (range index 1 = the "V" range): the
+    # live UT60BT Smart Measure app decodes the UNIT from the range index against its
+    # funOl1_UT60BT.json, where ACV range 0 = "mV" and range 1 = "V". A volt reading
+    # must therefore use range index 1, NOT 0 (range 0 makes the app display "mV" —
+    # confirmed live, then fixed in _range_index_for). The rest of the frame (function
+    # code 0x00=ACV, ASCII "  274.7", flags) is unchanged from the original capture.
     fixture = bytes([
-        0xab, 0xcd, 0x10, 0x00, 0x30, 0x20, 0x20, 0x32, 0x37, 0x34, 0x2e, 0x37,
-        0x00, 0x00, 0x00, 0x00, 0x08, 0x03, 0x02,
+        0xab, 0xcd, 0x10, 0x00, 0x31, 0x20, 0x20, 0x32, 0x37, 0x34, 0x2e, 0x37,
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x03, 0x03,
     ])
     f = uni_t.encode(Reading(value=274.7, function="ACV", decimals=1, auto=True))
     assert f == fixture
@@ -123,12 +128,38 @@ def test_get_name_returns_name_frame():
     assert b"UT60BT" in resp
 
 
-def test_get_data_returns_measurement_frame():
-    # AB CD 03 5D 01 D8  (GET_DATA)
+def test_get_data_arms_stream_and_returns_first_frame():
+    # AB CD 03 5D 01 D8  (GET_DATA). The corrected model is handshake-then-STREAM:
+    # GET_DATA does NOT pull one frame — it ARMS periodic streaming and returns the
+    # FIRST measurement frame. (The driver loops GET_DATA until measurements start.)
+    uni_t._METER.stop_stream()
+    assert uni_t._METER.streaming is False
     resp = uni_t.command(bytes([0xab, 0xcd, 0x03, 0x5d, 0x01, 0xd8]))
     assert resp is not None
     assert len(resp) == 19
     assert checksum_ok(resp)
+    assert uni_t._METER.streaming is True  # the write started the stream
+
+
+def test_tick_self_pushes_only_after_get_data_and_on_start():
+    # Before GET_DATA arms it, tick must NOT self-push (the meter is silent until the
+    # app writes GET_DATA). After GET_DATA + on_start(notify_cb), every tick pushes a
+    # fresh measurement frame — the periodic free-stream the app's SamplingManager reads.
+    pushed: list[bytes] = []
+    uni_t._METER.stop_stream()
+    uni_t._METER.on_start(pushed.append)
+    uni_t.set_walk(False)
+    uni_t.tick()
+    assert pushed == []  # silent until GET_DATA arms the stream
+    uni_t.command(bytes([0xab, 0xcd, 0x03, 0x5d, 0x01, 0xd8]))  # GET_DATA arms it
+    uni_t.tick()
+    uni_t.tick()
+    assert len(pushed) == 2
+    assert all(len(f) == 19 and checksum_ok(f) for f in pushed)
+    # stop_stream disarms: no more self-push.
+    uni_t._METER.stop_stream()
+    uni_t.tick()
+    assert len(pushed) == 2
 
 
 def test_hold_button_freezes_and_lights_hold():
@@ -153,6 +184,66 @@ def test_profile_is_polled_no_secure_no_info():
     assert uni_t.profile.info_uuid is None
     assert uni_t.profile.service_uuid == uni_t_base.ISSC_SERVICE
     assert uni_t.profile.command_handler is not None
+
+
+def test_profile_exposes_on_start_seam():
+    # The handshake-then-stream self-push needs the server to hand the profile its
+    # push callback via the ``on_start`` field (now a real base.Profile field that
+    # gatt_server.start() calls after the notify char is live).
+    on_start = uni_t.profile.on_start
+    assert callable(on_start)
+    # tick is still wired so the server's polled-tick timer drives the periodic push.
+    assert uni_t.profile.tick is not None
+    assert uni_t.profile.current_frame is not None
+
+
+def test_seam_one_frame_per_tick_no_double_push():
+    # Reproduce exactly what the server does end-to-end and assert NO double-push:
+    # the server calls profile.on_start(notify) once, then its polled-tick driver
+    # calls profile.tick() each timer fire. The profile self-pushes via the notify_cb
+    # — the server's polled tick must NOT also push current_frame(). So after
+    # GET_DATA arms the stream, every tick must yield EXACTLY ONE pushed frame.
+    pushed: list[bytes] = []
+    uni_t._METER.stop_stream()
+    uni_t.profile.on_start(pushed.append)  # server hands the profile its push fn
+    uni_t.set_walk(False)
+    # Before GET_DATA: tick is a no-op (silent until the app arms the stream).
+    uni_t.profile.tick()
+    assert pushed == []
+    # App writes GET_DATA -> arms streaming + returns the first frame (the server
+    # pushes that return separately via _on_write; not counted here).
+    uni_t.profile.command_handler(bytes([0xab, 0xcd, 0x03, 0x5d, 0x01, 0xd8]))
+    # Now each polled tick self-pushes EXACTLY ONE measurement frame.
+    for n in range(5):
+        before = len(pushed)
+        uni_t.profile.tick()
+        assert len(pushed) - before == 1, "double-push: tick emitted >1 frame"
+    assert all(len(f) == 19 and checksum_ok(f) for f in pushed)
+    uni_t._METER.stop_stream()
+
+
+def test_profile_exposes_both_write_uuids():
+    # The UNI-T ISSC service exposes both write chars; the app prefers …6daa…. The
+    # widened write_uuid (list) must surface both, with the 6daa fallback first.
+    uuids = uni_t.profile.write_uuids
+    assert uni_t_base.ISSC_WRITE in uuids
+    assert uni_t_base.ISSC_WRITE_FALLBACK in uuids
+    assert len(uuids) == 2
+    # the app's default (…6daa…) is listed first
+    assert uuids[0] == uni_t_base.ISSC_WRITE_FALLBACK
+
+
+def test_name_vs_measurement_frame_kinds():
+    # GET_NAME -> a name/CONTROL frame (not 19 bytes); GET_DATA -> a 19-byte
+    # MEASUREMENT frame. Mirrors framing.ts classify(): 19=measurement, else control.
+    name = uni_t.command(bytes([0xab, 0xcd, 0x03, 0x5f, 0x01, 0xda]))
+    meas = uni_t.command(bytes([0xab, 0xcd, 0x03, 0x5d, 0x01, 0xd8]))
+    assert name is not None and len(name) != 19  # control/name frame
+    assert meas is not None and len(meas) == 19   # measurement frame
+    # the re-arm nudge classifies as a 9-byte type-request (AB CD .. AA AA ..).
+    nudge = uni_t._METER.rearm_nudge()
+    assert nudge is not None and len(nudge) == 9
+    assert nudge[3] == 0xAA and nudge[4] == 0xAA
 
 
 def test_presets_encode():

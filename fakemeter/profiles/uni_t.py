@@ -55,19 +55,26 @@ FUNCTION_CODES = {}
 for _i, _name in enumerate(FUNCTIONS):
     FUNCTION_CODES.setdefault(_name, _i)
 
-# --- Range -> unit table (frame[4]-0x30 selects the unit), ported from types.ts.
+# --- Range -> unit table (frame[4]-0x30 selects the unit) -----------------------
+# AUTHORITATIVE: ported from the app's own `funOl1_UT60BT.json` "OL" map (extracted
+# from the Smart Measure APK assets and confirmed live on-screen). The app decodes
+# the unit as ``OL[function][str(byte[4]-0x30)][1]`` — i.e. the range INDEX selects
+# the unit string, NOT the prefix. The critical correction over the old types.ts port:
+# for V/A functions, range 0 is the MILLI range (mV/µA) and the bare-unit (V/A) ranges
+# start at index 1 — so an unprefixed volt reading must use range index 1, not 0
+# (range 0 made the app display "mV"). Lists are indexed by range index 0..n.
 RANGE_UNITS = {
-    "ACV": ["V", "V", "V", "V"],
-    "DCV": ["V", "V", "V", "V"],
+    "ACV": ["mV", "V", "V", "V"],
+    "DCV": ["mV", "V", "V", "V"],
     "LozV": ["V", "V", "V", "V"],
-    "ACmV": ["mV"],
-    "DCmV": ["mV"],
-    "Hz": ["Hz", "Hz", "kHz", "kHz", "kHz", "MHz", "MHz", "MHz"],
+    "ACmV": ["mV", "mV"],
+    "DCmV": ["mV", "mV"],
+    "Hz": ["Hz", "Hz", "Hz", "kHz", "kHz", "kHz", "MHz", "MHz"],
     "%": ["%"],
-    "OHM": ["Ω", "kΩ", "kΩ", "kΩ", "MΩ", "MΩ", "MΩ"],
+    "OHM": ["Ω", "kΩ", "kΩ", "kΩ", "MΩ", "MΩ"],
     "CONT": ["Ω"],
     "DIODE": ["V"],
-    "CAP": ["nF", "nF", "µF", "µF", "µF", "mF", "mF", "mF"],
+    "CAP": ["nF", "nF", "nF", "µF", "µF", "µF", "mF", "mF"],
     "°C": ["°C"],
     "°F": ["°F"],
     "DCuA": ["µA", "µA"],
@@ -79,9 +86,9 @@ RANGE_UNITS = {
     "HFE": [""],
     "Live": [""],
     "NCV": [""],
-    "LPF": ["V", "V", "V", "V"],
-    "AC/DC": ["V", "V", "V", "V"],
-    "LPFA": ["V", "V", "V", "V"],
+    "LPF": ["mV", "V", "V", "V"],
+    "AC/DC": ["mV", "V", "V", "V"],
+    "LPFA": ["mV", "V", "V", "V"],
     "AC+DC": ["A", "A"],
     "AC+DC2": ["A", "A"],
     "INRUSH": ["V", "V", "V", "V"],
@@ -99,16 +106,29 @@ ACDC_FUNCTIONS = {
 _PREFIXES = {"n", "µ", "u", "m", "k", "M", "G"}
 
 
-def _range_index_for(function: str, prefix: str) -> int:
-    """Pick a range index whose unit carries ``prefix`` (or 0 if none/unprefixed).
+_SI_PREFIX_CHARS = {"p", "n", "µ", "m", "k", "M", "G"}
 
-    Mirrors how the meter's range knob fixes the displayed unit's prefix. ``µ`` and
-    ``u`` are treated alike. The numeric value in the display string is independent
-    of this (the app reads the raw number); the range index only selects the unit.
+
+def _range_index_for(function: str, prefix: str) -> int:
+    """Pick the range index whose unit carries ``prefix`` (the meter's range knob).
+
+    The app decodes the displayed UNIT purely from this range index (``OL[function]
+    [str(range)][1]`` in funOl1_UT60BT.json), so the index must select a unit whose SI
+    prefix matches the Reading's. ``µ``/``u`` are equivalent. The numeric value in the
+    display string is independent (the app reads the raw number).
+
+    For an UNPREFIXED reading, pick the index whose unit is the BARE unit (no SI
+    prefix) — e.g. DCV range 0 is "mV" and range 1 is "V", so a plain volt reading
+    must use index 1, NOT 0 (index 0 made the app show "mV"). Falls back to 0 only if
+    no bare-unit range exists.
     """
     units = RANGE_UNITS.get(function, [""])
     pref = "µ" if prefix == "u" else prefix
     if pref in ("", None):
+        # Unprefixed: first range whose unit has no SI prefix (bare V/A/Ω/Hz/…).
+        for idx, unit in enumerate(units):
+            if unit and unit[:1] not in _SI_PREFIX_CHARS:
+                return idx
         return 0
     for idx, unit in enumerate(units):
         if unit[:1] == pref:

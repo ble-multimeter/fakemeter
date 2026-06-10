@@ -96,35 +96,36 @@ Build the `Profile` directly (don't use `owon_base`): set `service_uuid` /
 expose `current_frame`/`tick` from it, and (optionally) a `command_handler` that
 maps the family's button bytes onto its generic actions.
 
-## Recipe C — UNI-T family (polled AB-CD) — the seam only, not the protocol
+## Recipe C — UNI-T family (polled AB-CD, HANDSHAKE-THEN-STREAM) — BUILT
 
 Targets: uni-t / ut60bt (161) / ut117c / ut171 / ut181a / ut202bt / ut219p.
-These are **AB-CD framed, request/response (polled)** — the app writes a command
-and the meter replies; they do NOT free-stream. The GATT is the **ISSC Transparent
-UART** service (`49535343-…`), NOT FFF0; there is no secure/info char. Plan (NOT
-implemented here):
+`uni_t_base` IS now built (mirrors `owon_base`): ISSC GATT UUIDs, the AB-CD
+frame builder/parser (`build_frame_len8`/`len16`, `be16/le16_checksum`,
+`parse_opcode_*`), the `UniTProfile`/`UniTMeter`/`make_profile` wiring, and the
+`meter_core.InteractiveMeter` reuse for value-walk + HOLD/REL. A new model is just an
+encoder + a `UniTProfile` config (see `ut202bt.py` for the minimal example —
+it reuses `uni_t.encode` wholesale).
 
-1. A `uni_t_base` analogous to `owon_base`: the ISSC GATT UUIDs (see the UT60BT
-   memo — note there are TWO candidate write UUIDs; the emulator exposes one), the
-   AB-CD frame builder/parser, and a `command_handler(request) -> response_frame`.
-2. Set `interaction='polled'` so the server stays silent on subscribe and answers
-   each write (the seam is in place; see `gatt_server._on_notify_subscription` /
-   `_on_write` and `Profile.interaction`).
-3. Reuse `meter_core.InteractiveMeter` for the value-walk + HOLD/REL.
-
-**Polled is NOT purely reactive** — the live UNI-T driver shows two wrinkles the
-`command_handler` must handle, both expressible with the current seam:
+**The model is HANDSHAKE-THEN-STREAM, not reply-per-poll** (corrected 2026-06-10;
+verified against the driver + the decompiled Smart Measure app — see PROGRESS.md):
   - **Different request opcodes → different frame KINDS.** The app writes `GET_NAME`
     and waits for a *control/name* frame, THEN writes `GET_DATA` and waits for a
-    *measurement* frame. So `command_handler` must branch on the request opcode and
-    return the right kind of frame (name vs measurement), not one fixed format.
-  - **The meter may emit UNSOLICITED frames.** The AB-CD meter periodically sends
-    `type-request` / `data-request` nudges that the app's `onRequest` answers. The
-    server's auto re-push loop is OFF in polled mode, but a polled profile can push
-    anytime via `MeterServer.notify()`, and `Profile.tick` is left callable if a
-    `uni_t_base` wants timed nudges. (If this turns out common, consider a
-    `notify_cb` the server hands the profile so it can self-push without reaching
-    into the server — see "hindsight gaps" below.)
+    *measurement* frame. `UniTMeter.command` branches on the opcode: GET_NAME → name
+    frame, GET_DATA → arm streaming + first measurement frame.
+  - **GET_DATA GATES a free-stream, it does not pull one frame.** On GET_DATA the
+    meter sets `_streaming=True` and thereafter `tick()` self-pushes a fresh
+    measurement frame every tick (the periodic stream the app's SamplingManager
+    reads), plus an occasional re-arm nudge (the 9-byte `…AA AA…` type-request /
+    7-byte `…FF 00…` data-request the driver's `onRequest` answers).
+
+**The polled-stream SEAM `gatt_server.py`/`base.py` must provide** (flagged, not yet
+landed — base.py/gatt_server.py are owned elsewhere): the self-push needs the server
+to (1) hand the profile a push fn and (2) drive `tick` on a timer even in polled mode.
+`make_profile` already attaches `meter.on_start` to the profile instance. The owning
+agent adds: a `Profile.on_start` field; a `profile.on_start(self.notify)` call after
+`_resolve_chars`; and installing the GLib `_start_stream` timeout for polled-with-tick
+profiles on subscribe (`tick` is a no-op until GET_DATA arms it). Until then, only the
+FIRST GET_DATA frame is delivered (the `_on_write → command_handler → notify` path).
 
 ## Driver → base map (for the fan-out)
 
@@ -135,9 +136,10 @@ implemented here):
 | owon-old                                             | `owon_base`     | stream      | app-dependent † |
 | bdm                                                  | `meter_core`    | stream      | none      |
 | ai-care                                              | `meter_core`    | stream      | none (FFB0) |
-| uni-t, ut60bt/161, ut117c, ut171, ut181a, ut202bt, ut219p | `uni_t_base`*   | polled      | none (ISSC) |
+| uni-t, ut60bt/161, ut117c, ut171, ut181a, ut202bt, ut219p | `uni_t_base`   | polled (handshake-then-stream) | none (ISSC) |
 
-\* `uni_t_base` is not built yet — only the `interaction='polled'` seam + this plan.
+`uni_t_base` is BUILT (handshake-then-stream, see Recipe C). The periodic self-push
+awaits the `on_start` + polled-`tick` seam in gatt_server.py/base.py (flagged above).
 
 † **Decide which app you emulate first.** The driver `decode` for owon-plus/owon-old
 was ported from the *Windows* app (`owonPlusTypeDecode`), which streams with NO
@@ -174,9 +176,13 @@ Seams designed against one profile (voltcraft) that the second wave may stress:
 - **`write` is a single UUID.** The driver's `gatt.write` is a LIST (UNI-T has a
   primary + fallback ISSC write char). `Profile.write_uuid` is one string. Fine for
   the emulator (expose one), but if an app probes the fallback, widen to a list.
-- **Polled self-push.** A polled meter that emits unsolicited nudge frames currently
-  has to call `MeterServer.notify()` directly. If that's common, hand the profile a
-  `notify_cb` at start so it can self-push without reaching into the server.
+- **Polled self-push — NEEDED, SPECIFIED (UNI-T handshake-then-stream).** A polled
+  meter that free-streams after a GET_DATA write must self-push periodic frames, but
+  in `'polled'` mode the server's stream loop is OFF and the profile has no ref to
+  `MeterServer.notify`. The required seam (Recipe C): add `Profile.on_start(notify_cb)`,
+  have the server call it after `_resolve_chars`, and install the GLib tick timer for
+  polled-with-tick profiles on subscribe. `uni_t_base.make_profile` already attaches
+  `meter.on_start`; the server just needs to call it + drive `tick`.
 - **`function`/gear vocabulary differs per family.** voltcraft uses `V_DC/OHM/…`;
   the bdm/owon decoders emit range-independent keys (`ACV/DCV/OHM/…`). The encoder
   owns its own vocabulary (the `Reading.function` string is opaque to the core), so

@@ -36,6 +36,15 @@ def test_sniff_predicate():
     assert len(f) == 11 and f[0] == 0x1B and f[1] == 0x84
 
 
+def test_device_type_byte_is_ab300():
+    # Descrambled byte 2 must be the AB_300 selector (0x03) so the official
+    # com.yscoco.wyboem Android app dispatches to the unit/flag remap that this
+    # frame's bit layout matches (getRightOrderTable300). The driver ignores it.
+    f = bdm.encode(Reading(value=4.200, function="V_DC", decimals=3))
+    descrambled_byte2 = (f[2] ^ bdm.DATASHIFT[2]) & 0xFF
+    assert descrambled_byte2 == bdm.DEVICE_TYPE_AB300 == 0x03
+
+
 def test_dc_volts():
     f = bdm.encode(Reading(value=4.200, function="V_DC", prefix="", decimals=3))
     d = decode_bdm(f)
@@ -154,12 +163,13 @@ def test_bitsweep_single_bit():
     sweep = bdm.profile.presets["bitsweep"]()
     assert len(sweep) == bdm.BIT_LEN
     # Each sweep entry sets exactly one field bit (plus the forced header bits).
+    # Forced constants occupy bytes 0/1 (0x5A 0xA5) AND byte 2 (the AB_300
+    # device-type selector 0x03), i.e. bits [0, 24); the meaningful body is [24, 88).
     for i, r in enumerate(sweep):
         f = bdm.encode(r)
         bits = descramble(f)
-        # header bits forced on; count set bits beyond the header region [16:88).
-        body_set = sum(1 for k in range(16, bdm.BIT_LEN) if bits[k] == "1")
-        if i >= 16:
+        body_set = sum(1 for k in range(24, bdm.BIT_LEN) if bits[k] == "1")
+        if i >= 24:
             assert body_set == 1
 
 

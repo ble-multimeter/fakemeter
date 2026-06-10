@@ -56,10 +56,12 @@ def test_flag_roundtrip(flag):
     assert decode_ut181a(ut181a.encode(r)).flags[flag] is True
 
 
-def test_start_returns_measurement():
-    # START (opcode 0x05) is our get_data_op.
+def test_start_arms_stream_and_returns_first_measurement():
+    # START (opcode 0x05) is our get_data_op. Handshake-then-stream: it ARMS streaming.
+    ut181a._METER.stop_stream()
     resp = ut181a.command(bytes([0xab, 0xcd, 0x04, 0x00, 0x05, 0x01, 0x0a, 0x00]))
     assert resp is not None and checksum_ok(resp)
+    assert ut181a._METER.streaming is True
 
 
 def test_profile_polled():

@@ -31,6 +31,7 @@ from bluezero import peripheral
 from gi.repository import GLib
 
 from .profiles.base import Profile
+from .unsolicited import UnsolicitedNotifier
 
 log = logging.getLogger("fakemeter")
 
@@ -67,11 +68,24 @@ class MeterServer:
     """A running fake-meter BLE peripheral for one profile on one adapter."""
 
     def __init__(self, profile: Profile, adapter_id: str = "hci0",
-                 local_name: Optional[str] = None):
+                 local_name: Optional[str] = None, unsolicited: bool = True):
         self.profile = profile
         self.adapter_id = adapter_id
         self.adapter_addr = adapter_address(adapter_id)
         self.local_name = local_name or profile.default_name
+
+        # No-CCCD (unsolicited) notification delivery. Some vendor apps (notably
+        # the OWON Multimeter BLE4.0 Java app) never write the FFF4 CCCD; BlueZ
+        # then refuses to route notifications to them (it gates strictly on the
+        # CCCD — see unsolicited.py). When enabled (default, stream profiles only)
+        # we inject ATT notifications via a raw HCI socket so those apps still get
+        # a live reading, while the normal CCCD path keeps serving well-behaved
+        # apps. Needs CAP_NET_RAW to actually deliver; degrades gracefully if not.
+        self._unsol_enabled = unsolicited and profile.interaction == "stream"
+        self._unsol: Optional[UnsolicitedNotifier] = None
+        self._unsol_streaming = False
+        self._unsol_source_id: Optional[int] = None
+        self._client_subscribed = False  # True once the client writes the CCCD
 
         self._periph: Optional[peripheral.Peripheral] = None
         self._notify_char = None  # localGATT.Characteristic
@@ -115,13 +129,18 @@ class MeterServer:
             notify_callback=self._on_notify_subscription,
         )
 
-        # Write characteristic — log whatever the app writes (auth probes, etc).
-        periph.add_characteristic(
-            srv_id=_SRV_ID, chr_id=_CHR_WRITE, uuid=p.write_uuid,
-            value=[], notifying=False,
-            flags=["write", "write-without-response"],
-            write_callback=self._on_write,
-        )
+        # Write characteristic(s) — log whatever the app writes (auth probes, control
+        # commands, …). A family may expose SEVERAL interchangeable write chars (UNI-T
+        # publishes both …8841… and …6daa…; the Smart Measure app prefers …6daa…), so
+        # add one per UUID — all dispatch to the same _on_write handler. chr_ids are
+        # offset from _CHR_WRITE so each is unique within the service.
+        for offset, write_uuid in enumerate(p.write_uuids):
+            periph.add_characteristic(
+                srv_id=_SRV_ID, chr_id=_CHR_WRITE + offset * 10, uuid=write_uuid,
+                value=[], notifying=False,
+                flags=["write", "write-without-response"],
+                write_callback=self._on_write,
+            )
 
         # Optional secure / FFF1 MD5 characteristic.
         if p.secure_uuid:
@@ -163,10 +182,27 @@ class MeterServer:
     def _on_notify_subscription(self, notifying, characteristic):
         state = "START" if notifying else "STOP"
         log.info("[%s] notify %s on %s", self.adapter_id, state, self.profile.notify_uuid)
+        # A real CCCD write arrived: the client IS a well-behaved subscriber. Hand
+        # delivery back to BlueZ's normal path and stop any unsolicited injection.
+        self._client_subscribed = notifying
+        if notifying:
+            self._stop_unsol_stream()
         # INTERACTION seam: only the free-STREAMING families run the re-push loop.
         # A 'polled' (request/response, e.g. UNI-T AB-CD) meter stays silent on
         # subscribe and only answers writes — see _on_write / Profile.interaction.
         if self.profile.interaction != "stream":
+            # Polled handshake-then-stream (UNI-T): the meter does NOT free-stream on
+            # subscribe, but once the app writes GET_DATA the profile's tick must run
+            # on a timer to emit the periodic measurement frames. Install that timer
+            # on subscribe (tick is a no-op until GET_DATA arms it). The profile
+            # SELF-PUSHES each frame via the notify_cb it got from on_start, so the
+            # polled tick driver only DRIVES tick — it must NOT also push
+            # current_frame() (that would double the stream rate).
+            if getattr(self.profile, "tick", None) is not None:
+                if notifying:
+                    self._start_polled_tick()
+                else:
+                    self._stop_stream()
             return
         if notifying:
             self._start_stream()
@@ -217,6 +253,40 @@ class MeterServer:
                 log.exception("[%s] stream push failed", self.adapter_id)
         return True  # keep the timeout source alive
 
+    # -- polled (handshake-then-stream) tick driver ------------------------
+    def _start_polled_tick(self) -> None:
+        """Drive a 'polled' profile's tick on the loop timer (UNI-T handshake-stream).
+
+        Unlike _start_stream this does NOT push current_frame() — the polled profile
+        self-pushes each measurement frame via the notify_cb it got from on_start, so
+        the driver only advances tick (which is a no-op until GET_DATA arms the
+        stream). Pushing current_frame() here too would emit two frames per tick.
+        """
+        if self._streaming:
+            return
+        self._streaming = True
+        log.info("[%s] polled tick @ %dms while subscribed (self-push on GET_DATA)",
+                 self.adapter_id, self._stream_interval_ms)
+        GLib.idle_add(self._install_polled_source)
+
+    def _install_polled_source(self) -> bool:
+        if not self._streaming:
+            return False  # subscription already gone
+        self._stream_source_id = GLib.timeout_add(
+            self._stream_interval_ms, self._polled_tick)
+        return False  # one-shot idle
+
+    def _polled_tick(self) -> bool:
+        # Runs on the GLib main-loop thread. Drive the profile's tick ONLY; the
+        # profile self-pushes the frame via its notify_cb (no current_frame() push).
+        if not self._streaming:
+            return False  # stop the timeout source
+        try:
+            self.profile.tick()
+        except Exception:
+            log.exception("[%s] polled tick failed", self.adapter_id)
+        return True  # keep the timeout source alive
+
     def _stop_stream(self) -> None:
         self._streaming = False
         src = self._stream_source_id
@@ -232,6 +302,99 @@ class MeterServer:
             pass
         return False
 
+    # -- unsolicited (no-CCCD) delivery ------------------------------------
+    def _connected_acl_handle(self) -> Optional[int]:
+        """The ACL handle of a client connected to OUR adapter, via ``hcitool con``.
+
+        We want the link where the remote is CENTRAL (the phone connected to us as
+        a peripheral). ``hcitool con`` lists ``... handle N state 1 lm CENTRAL``.
+        Returns the handle int, or None if no such link.
+        """
+        try:
+            out = subprocess.run(["hcitool", "-i", self.adapter_id, "con"],
+                                 capture_output=True, text=True, timeout=4).stdout
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return None
+        best = None
+        for line in out.splitlines():
+            m = re.search(r"handle\s+(\d+).*lm\s+(\w+)", line)
+            if not m:
+                continue
+            handle, role = int(m.group(1)), m.group(2).upper()
+            # The phone is CENTRAL on a link to our peripheral; prefer those.
+            if role == "CENTRAL":
+                best = handle
+            elif best is None:
+                best = handle
+        return best
+
+    def _poll_connection(self) -> bool:
+        """GLib timeout: track the client link + drive unsolicited injection.
+
+        While a client is connected but has NOT subscribed via the CCCD, run an
+        injection stream (real meters free-stream regardless of CCCD; apps that
+        don't subscribe — e.g. the OWON Java app — only get data this way). As soon
+        as a CCCD write arrives (_on_notify_subscription) we defer to BlueZ.
+        """
+        if self._unsol is None:
+            return True  # keep polling in case the notifier arms later
+        handle = self._connected_acl_handle()
+        self._unsol.set_acl_handle(handle)
+        connected = handle is not None
+        want_inject = connected and not self._client_subscribed
+        if want_inject and not self._unsol_streaming:
+            self._start_unsol_stream()
+        elif not want_inject and self._unsol_streaming:
+            self._stop_unsol_stream()
+        if not connected:
+            self._client_subscribed = False  # reset for the next connection
+        return True  # keep the poll alive
+
+    def _start_unsol_stream(self) -> None:
+        if self._unsol_streaming:
+            return
+        self._unsol_streaming = True
+        log.info("[%s] client connected without CCCD subscription — injecting "
+                 "unsolicited frames @ %dms (no-CCCD path)",
+                 self.adapter_id, self._stream_interval_ms)
+        self._unsol_source_id = GLib.timeout_add(
+            self._stream_interval_ms, self._unsol_tick)
+
+    def _unsol_tick(self) -> bool:
+        if not self._unsol_streaming or self._unsol is None:
+            return False
+        if self._client_subscribed:
+            return False  # BlueZ took over
+        prof = self.profile
+        if getattr(prof, "tick", None) is not None:
+            try:
+                prof.tick()
+            except Exception:
+                log.exception("[%s] tick failed", self.adapter_id)
+        frame = self._last_frame
+        if getattr(prof, "current_frame", None) is not None:
+            try:
+                frame = prof.current_frame()
+                self._last_frame = frame
+            except Exception:
+                log.exception("[%s] current_frame failed", self.adapter_id)
+        if frame is not None:
+            try:
+                self._unsol.inject(bytes(frame))
+            except Exception:
+                log.exception("[%s] unsolicited inject failed", self.adapter_id)
+        return True
+
+    def _stop_unsol_stream(self) -> None:
+        self._unsol_streaming = False
+        src = self._unsol_source_id
+        self._unsol_source_id = None
+        if src is not None:
+            try:
+                GLib.source_remove(src)
+            except Exception:
+                pass
+
     def _on_notify_read(self):
         # A read of the notify char just returns the current value (last frame).
         ch = self._notify_char
@@ -240,7 +403,7 @@ class MeterServer:
     def _on_write(self, value, options):
         data = bytes(value)
         log.info("[%s] WRITE %s <- %s (%d bytes)",
-                 self.adapter_id, self.profile.write_uuid, data.hex(), len(data))
+                 self.adapter_id, self.profile.write_uuids[0], data.hex(), len(data))
         # If the profile knows how to react to control-button commands (e.g. the
         # Voltcraft HOLD/Select/Range/AC-DC keys written to FFF3), let it mutate
         # its internal reading and hand back the new frame to stream. We push it via
@@ -256,7 +419,7 @@ class MeterServer:
                           self.adapter_id, data.hex())
             return
         if frame is not None:
-            log.info("[%s] command %s -> new frame %s",
+            log.info("[%s] command %s -> reply frame %s",
                      self.adapter_id, data.hex(), bytes(frame).hex())
             self.notify(bytes(frame))
 
@@ -288,9 +451,18 @@ class MeterServer:
         """Publish the GATT app + advertisement on a background thread."""
         def _run():
             self._resolve_chars()
+            # Hand a 'polled' (handshake-then-stream) profile the thread-safe push fn
+            # so its tick can self-push the periodic measurement stream once the app's
+            # GET_DATA write arms it. The notify char is live now (post-resolve).
+            on_start = self.profile.on_start
+            if on_start is not None:
+                try:
+                    on_start(self.notify)
+                except Exception:
+                    log.exception("[%s] profile.on_start failed", self.adapter_id)
             log.info("[%s] publishing '%s'  service=%s notify=%s write=%s%s",
                      self.adapter_id, self.local_name, self.profile.service_uuid,
-                     self.profile.notify_uuid, self.profile.write_uuid,
+                     self.profile.notify_uuid, ",".join(self.profile.write_uuids),
                      f" secure={self.profile.secure_uuid}" if self.profile.secure_uuid else "")
             self._ready.set()
             try:
@@ -304,6 +476,22 @@ class MeterServer:
         self._thread.start()
         # give BlueZ a moment to register the application + advertisement
         self._ready.wait(timeout=5.0)
+
+        # Arm the no-CCCD (unsolicited) notifier + the connection poll that drives
+        # it. Scheduled onto the GLib loop thread so the timeout source is created
+        # there. Stream profiles only (polled meters answer writes, not free-stream).
+        if self._unsol_enabled:
+            self._unsol = UnsolicitedNotifier(self.adapter_id)
+            if self._unsol.start():
+                # seed the learned value handle from any explicit override later;
+                # poll the link every 500ms (connection up/down + inject lifecycle).
+                GLib.idle_add(self._install_unsol_poll)
+            else:
+                self._unsol = None  # binding failed entirely; no-op
+
+    def _install_unsol_poll(self) -> bool:
+        GLib.timeout_add(500, self._poll_connection)
+        return False  # one-shot idle
 
     def notify(self, frame: bytes) -> None:
         """Push one crafted frame on the notify characteristic.

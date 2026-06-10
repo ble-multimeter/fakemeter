@@ -58,11 +58,14 @@ def test_acdc():
     assert ac.acdc == "AC" and dc.acdc == "DC"
 
 
-def test_poll_returns_measurement():
+def test_poll_arms_stream_and_returns_first_measurement():
     # The app's poll: AB CD 00 04 05 00 01 81 (cmd 0x05 = POLL = get_data_op).
+    # Handshake-then-stream: the poll ARMS streaming + returns the first frame.
+    ut117c._METER.stop_stream()
     resp = ut117c.command(bytes([0xab, 0xcd, 0x00, 0x04, 0x05, 0x00, 0x01, 0x81]))
     assert resp is not None and len(resp) == DATA_TOTAL
     assert checksum_ok(resp)
+    assert ut117c._METER.streaming is True
 
 
 def test_hold_button():

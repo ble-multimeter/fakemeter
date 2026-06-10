@@ -52,6 +52,13 @@ DATASHIFT = (65, 33, 115, 85, 162, 193, 50, 113, 102, 170, 59)
 SYNC0 = 0x1B
 SYNC1 = 0x84
 
+# Descrambled byte 2 = device-type selector the official "Bluetooth DMM" Android app
+# (com.yscoco.wyboem) dispatches on. The driver/profile fixed-offset frame is the
+# app's AB_300 (type 3) decode path; emit it so the app's unit/AC-DC/flag remap
+# (getRightOrderTable300) lines up. The driver ignores this byte (syncs on the raw
+# 0x1B 0x84 header; digits start at bit 24), so it is invisible to the oracle.
+DEVICE_TYPE_AB300 = 0x03
+
 # 7-segment table (bdm.ts SEG): key = first(3 bits) + second(4 bits) -> glyph.
 # Inverted below to glyph -> 7-bit key for encoding.
 SEG = {
@@ -227,6 +234,19 @@ def encode(reading: Reading) -> bytes:
         bits[bit] = int(val)
     for bit, val in enumerate(f"{0xA5:08b}"):
         bits[8 + bit] = int(val)
+
+    # Descrambled byte 2 = the DEVICE-TYPE selector the official Android app
+    # (``com.yscoco.wyboem`` ``DataParsing.dealData``) dispatches on: ``1``=QB_5G,
+    # ``2``=S_5G, ``3``=AB_300, ``4``=P_66. The driver/this profile's fixed bit
+    # offsets + the FFF4 11-byte frame are the app's **AB_300 (type 3)** path
+    # (``getRightOrderTable300`` → ``getUnit``/``getTag``). With byte2 left at 0 the
+    # app falls into its S_5G ``else`` branch, which remaps the unit/flag bits
+    # differently → the app would show the right DIGITS but the WRONG unit/AC-DC.
+    # The driver ``bdm.ts`` ignores byte 2 (it syncs on raw ``0x1B 0x84`` and the
+    # digits start at bit 24), so this is invisible to the driver oracle. Setting
+    # it to 3 makes the real app decode unit/AC-DC/flags correctly.
+    for bit, val in enumerate(f"{DEVICE_TYPE_AB300:08b}"):
+        bits[16 + bit] = int(val)
 
     if reading.raw_mode_word is not None:
         # Bit-sweep: lay the raw mode word across status-relevant region. We set one

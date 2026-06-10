@@ -1,11 +1,24 @@
-"""UNI-T family shared layer — the polled AB-CD request/response codec.
+"""UNI-T family shared layer — the polled AB-CD handshake-then-stream codec.
 
 This is to the UNI-T family what ``owon_base`` is to the OWON family: everything
 the UNI-T meters share, so a per-model profile supplies only its measurement
-encoder + a tiny config. The UNI-T family is fundamentally different from OWON,
-though: it is **polled** (``interaction='polled'``), framed with an ``AB CD`` sync
-header, and request/response — the app WRITES a command and the meter REPLIES with
-exactly one frame; there is no free-stream loop.
+encoder + a tiny config. The UNI-T family is ``interaction='polled'`` — there is NO
+free-stream-on-subscribe — but it is NOT reply-one-frame-per-write. The corrected
+model (verified against the driver ``uni-t.ts`` + the decompiled UNI-T Smart Measure
+app, ``com.uni_t.multimeter`` ``BleManager``/``com.inuker`` BLE lib) is
+**handshake-then-stream**:
+
+  1. App subscribes (the inuker lib WRITES the 0x2902 CCCD — see the report; this is
+     the OPPOSITE of the OWON Java app, so UNI-T does NOT hit the CCCD wall).
+  2. App WRITES ``GET_NAME`` (``AB CD 03 5F 01 DA``) → meter replies a *name/control*
+     frame announcing the model (``requestDeviceType`` in BleManager).
+  3. App WRITES ``GET_DATA`` (``AB CD 03 5D 01 D8``; = ``sendCmd(93)``/``pushCmdToList(93)``)
+     → meter **STARTS FREE-STREAMING** 19-byte measurement frames periodically; the
+     app's ``SamplingManager`` reads them continuously. The write GATES the stream;
+     it does NOT pull a single frame.
+  4. The meter periodically pushes a re-arm nudge: a 9-byte ``…AA AA…`` (=
+     ``type-request`` → app re-sends GET_NAME) or a 7-byte ``…FF 00…`` (=
+     ``data-request``). Optional; the app keeps streaming regardless.
 
 What lives here (the UNI-T-shared layer):
   * **GATT** — the Microchip/ISSC "Transparent UART" service (NOT FFF0):
@@ -16,26 +29,51 @@ What lives here (the UNI-T-shared layer):
         additive checksum over bytes[0..n-3] (see ``build_frame_len8``).
       - the newer ut117c/ut171/ut181a/ut219p frames: 16-bit length, additive
         checksum stored either BE or LE (per model) — see ``build_frame_len16``.
-  * **the command-handler seam** — ``command_handler(request) -> response|None``
-    that PARSES the inbound AB-CD frame, branches on its opcode, and returns the
-    right KIND of reply: a *name/control* frame for GET_NAME, a *measurement*
-    frame for GET_DATA. This is the polled wrinkle the refactor flagged: different
-    request opcodes map to different reply frame kinds.
+  * **the command seam** — ``command(request) -> response|None`` that PARSES the
+    inbound AB-CD frame, branches on its opcode, and returns the right KIND of
+    reply: a *name/control* frame for GET_NAME, the FIRST *measurement* frame for
+    GET_DATA (which ALSO arms periodic streaming — see below). Different request
+    opcodes map to different reply frame kinds.
+  * **handshake-then-stream self-push** — on GET_DATA the meter ARMS streaming
+    (``self._streaming = True``). The first measurement frame is returned from
+    ``command`` (so the app gets one immediately even with no further help). The
+    SUBSEQUENT periodic frames are self-pushed by ``tick()``: while armed and a
+    ``notify_cb`` is set, every ``tick`` advances the value-walk and pushes a fresh
+    measurement frame (plus the occasional re-arm nudge).
   * **HOLD/REL/value-walk** via the shared ``meter_core.InteractiveMeter``.
 
 A profile builds a :class:`UniTProfile` config + a :class:`UniTMeter`, then calls
 :func:`make_profile`, which returns a fully-wired :class:`Profile` with
 ``interaction='polled'``.
 
-POLLED-SEAM SHARED-INTERFACE GAPS (flagged, NOT edited — see the agent report):
+REQUIRED gatt_server.py / base.py SEAM (flagged, NOT edited here — see the agent
+report). The handshake-then-stream self-push needs the server to drive ``tick`` AND
+to hand the profile a push callback, because in ``'polled'`` mode the server's
+stream loop is OFF and the profile has no reference to ``MeterServer.notify``. The
+exact, minimal addition the OTHER agent must make to ``gatt_server.py`` + ``base.py``:
+
+  1. **``base.Profile.on_start: Optional[Callable[[Callable[[bytes], None]], None]] = None``**
+     — a new optional field. ``make_profile`` already sets it to ``meter.on_start``.
+  2. In ``gatt_server.MeterServer``: after ``_resolve_chars()`` (in ``start``'s
+     ``_run`` or on first subscribe), if ``profile.on_start`` is not None call
+     ``profile.on_start(self.notify)``, handing the profile a thread-safe push fn.
+  3. In ``gatt_server._on_notify_subscription``: for ``'polled'`` profiles that
+     expose a ``tick``, ALSO install the GLib timeout source (the same
+     ``_start_stream`` machinery, which already calls ``tick`` then pushes
+     ``current_frame``) — OR simply run ``_start_stream`` for polled-with-tick too.
+     Driving ``tick`` on the loop timer is what produces the periodic measurement
+     frames after GET_DATA arms streaming. (``tick`` is a no-op until GET_DATA arms
+     it, so installing the timer on subscribe is harmless.)
+
+Until that seam lands, ``command`` still returns the FIRST measurement frame on
+GET_DATA (the server's existing ``_on_write`` → ``command_handler`` → ``notify``
+path pushes it), so a manual REPL ``r`` re-send keeps the reading visible; only the
+AUTOMATIC periodic re-push is gated on the seam above.
+
+OTHER SHARED-INTERFACE GAP (flagged):
   * ``Profile.write_uuid`` is a single string; the UNI-T ``gatt.write`` is a LIST
-    (primary ``…8841…`` + fallback ``…6daa…``). We expose only the primary here.
-  * A polled meter that emits UNSOLICITED type-request/data-request *nudges* would
-    need a ``notify_cb`` handed to the profile at start to self-push. We do NOT do
-    that here (the server's stream loop is off in polled mode); the live driver's
-    ``onRequest`` re-arm is answered purely reactively (the app re-polls). If timed
-    nudges become necessary, ``Profile.tick`` is left callable + a ``notify_cb``
-    seam is the suggested shared addition.
+    (primary ``…8841…`` + fallback ``…6daa…`` — the app actually defaults to the
+    ``…6daa…`` one, see BleManager.WriteUUID). We expose only the primary here.
 """
 
 from __future__ import annotations
@@ -196,11 +234,14 @@ class UniTProfile:
     function_codes: List[str] = field(default_factory=list)
     presets: dict = field(default_factory=dict)
 
-    # GATT (the shared ISSC set). write_uuid is the primary char; the family also
-    # exposes a fallback the single-string seam can't carry (flagged).
+    # GATT (the shared ISSC set). The real UNI-T meters expose BOTH write chars
+    # (``…8841…`` + ``…6daa…``); the Smart Measure app actually prefers ``…6daa…``.
+    # ``write_uuid`` now accepts a list, so we publish both and the app can write to
+    # whichever it probes. ``…6daa…`` is listed first to match the app's default.
     service_uuid: str = ISSC_SERVICE
     notify_uuid: str = ISSC_NOTIFY
-    write_uuid: str = ISSC_WRITE
+    write_uuid: object = field(  # str | list[str]; default = both write chars
+        default_factory=lambda: [ISSC_WRITE_FALLBACK, ISSC_WRITE])
 
 
 # Named controls -> the generic InteractiveMeter action that services them. Same
@@ -220,15 +261,26 @@ CONTROL_ACTIONS = {
 
 
 class UniTMeter:
-    """A live polled UNI-T meter: the interactive engine + the AB-CD command seam.
+    """A live polled UNI-T meter: handshake-then-stream over the AB-CD command seam.
 
     Holds the single source-of-truth reading and answers each app WRITE. The seam:
       * a GET_NAME request -> the control/name frame (model identity),
-      * a GET_DATA request -> a fresh measurement frame,
+      * a GET_DATA request -> ARM periodic streaming + return the FIRST measurement
+        frame (the write gates the stream; subsequent frames come from ``tick``),
       * a soft-button opcode -> mutate state via CONTROL_ACTIONS, reply with the new
         measurement frame,
       * anything else -> None (acknowledged-but-silent / unknown opcode).
+
+    Once GET_DATA has armed streaming and the server has handed us a ``notify_cb``
+    (via :meth:`on_start`), :meth:`tick` self-pushes a fresh measurement frame each
+    tick — this is the periodic free-stream the app's SamplingManager consumes —
+    and occasionally a re-arm nudge (the AB-CD type-request/data-request the driver's
+    ``onRequest`` answers).
     """
+
+    # Push a re-arm nudge every Nth streaming tick (mirrors the real meter's
+    # occasional 9-byte AA-AA / 7-byte FF-00 frames). 0 disables nudges.
+    NUDGE_EVERY = 0
 
     def __init__(self, cfg: UniTProfile):
         self.cfg = cfg
@@ -242,14 +294,40 @@ class UniTMeter:
             ),
             initial=cfg.initial,
         )
+        # Handshake-then-stream state. ``_streaming`` is armed by GET_DATA and
+        # gates the periodic self-push in ``tick``. ``_notify_cb`` is the
+        # thread-safe push fn the server hands us via on_start (None until then,
+        # in which case ``tick`` simply advances the walk without self-pushing).
+        self._streaming = False
+        self._notify_cb: Optional[Callable[[bytes], None]] = None
+        self._tick_count = 0
+
+    # -- server handshake seam ---------------------------------------------
+    def on_start(self, notify_cb: Callable[[bytes], None]) -> None:
+        """Receive the server's thread-safe push callback (``MeterServer.notify``).
+
+        Called once by the server after publish/resolve (see the REQUIRED SEAM in
+        the module docstring). Lets a polled meter self-push the periodic stream +
+        re-arm nudges without reaching into the server. Safe to call more than once.
+        """
+        self._notify_cb = notify_cb
+
+    @property
+    def streaming(self) -> bool:
+        return self._streaming
+
+    def stop_stream(self) -> None:
+        """Disarm the stream (e.g. on disconnect / a stop command)."""
+        self._streaming = False
+        self._tick_count = 0
 
     # -- the polled command seam -------------------------------------------
     def command(self, data: bytes) -> Optional[bytes]:
         """Service one app WRITE; return the reply frame (or None).
 
-        Branches on the inbound opcode: GET_NAME -> name frame, GET_DATA ->
-        measurement frame, a mapped soft-button -> state-mutating reply. Returns
-        None for an unrecognised opcode (the server then stays silent)."""
+        Branches on the inbound opcode: GET_NAME -> name frame, GET_DATA -> ARM
+        streaming + first measurement frame, a mapped soft-button -> state-mutating
+        reply. Returns None for an unrecognised opcode (the server stays silent)."""
         if not data:
             return None
         op = self.cfg.parse_opcode(bytes(data))
@@ -258,6 +336,11 @@ class UniTMeter:
         if op == self.cfg.get_name_op:
             return self.cfg.name_frame or None
         if op == self.cfg.get_data_op:
+            # GET_DATA gates the free-stream: arm periodic self-push and return the
+            # first measurement frame immediately (the write does NOT pull a single
+            # frame — it starts the stream).
+            self._streaming = True
+            self._tick_count = 0
             return self.meter.current_frame()
         name = self.controls.get(op)
         if name is None:
@@ -267,6 +350,33 @@ class UniTMeter:
             return None
         # A control press mutates state and yields a fresh measurement frame.
         return action(self.meter)
+
+    # -- periodic self-push (the post-GET_DATA stream) ----------------------
+    def tick(self) -> None:
+        """Advance one stream tick. While streaming is armed and a notify_cb is
+        present, push a fresh measurement frame (the periodic stream the app reads),
+        and occasionally a re-arm nudge. A no-op until GET_DATA arms streaming, so
+        the server may install the tick timer on subscribe harmlessly."""
+        self.meter.tick()  # advance the demo value-walk regardless
+        if not self._streaming or self._notify_cb is None:
+            return
+        self._tick_count += 1
+        if self.NUDGE_EVERY and self._tick_count % self.NUDGE_EVERY == 0:
+            nudge = self.rearm_nudge()
+            if nudge is not None:
+                self._notify_cb(nudge)
+        self._notify_cb(self.meter.current_frame())
+
+    def rearm_nudge(self) -> Optional[bytes]:
+        """The occasional unsolicited re-arm frame the meter emits (the driver's
+        ``onRequest`` answers it by re-writing GET_NAME/GET_DATA). The UT60BT generic
+        frame uses a 9-byte ``…AA AA…`` (type-request → re-send GET_NAME). Override
+        per-model (or set ``NUDGE_EVERY = 0`` to disable). Default: the 9-byte
+        type-request nudge."""
+        # AB CD 06 AA AA <pad...> — a 9-byte frame whose bytes[3..4] = AA AA, which
+        # the app classifies as a type-request (re-send GET_NAME). build_frame_len8
+        # makes len = payload+2; payload of 4 bytes => total 9.
+        return build_frame_len8(bytes([0xAA, 0xAA, 0x00, 0x00]))
 
     # -- REPL hooks ---------------------------------------------------------
     def current_frame(self) -> bytes:
@@ -278,19 +388,26 @@ class UniTMeter:
     def set_walk(self, on: bool) -> None:
         self.meter.set_walk(on)
 
-    def tick(self) -> None:
-        self.meter.tick()
-
 
 def make_profile(cfg: UniTProfile, meter: UniTMeter) -> Profile:
     """Build the fully-wired polled :class:`Profile` for a UNI-T meter instance.
 
     No secure/info char (the family has none). ``interaction='polled'`` so the
-    server stays silent on subscribe and answers each write via ``command_handler``.
-    ``current_frame`` / ``tick`` are still provided so a future timed-nudge path (or
-    a manual REPL push) can use them, but the stream loop itself is OFF in polled
-    mode."""
-    return Profile(
+    server stays silent on subscribe; the app's GET_DATA write ARMS the stream and
+    ``tick`` self-pushes the periodic measurement frames (handshake-then-stream).
+
+    The profile carries:
+      * ``command_handler`` = ``meter.command`` — GET_NAME→name, GET_DATA→arm+first
+        frame, soft-button→state-mutating reply (the server pushes the return).
+      * ``tick`` = ``meter.tick`` — the periodic self-push once GET_DATA armed it.
+      * ``current_frame`` — the current measurement frame (REPL ``r`` / first push).
+      * ``on_start`` (attached below) — receives the server's ``notify`` callback so
+        ``tick`` can self-push. ``Profile`` has no ``on_start`` FIELD yet (base.py is
+        owned by another agent); we attach it as an instance attribute so the
+        server can ``getattr(profile, 'on_start', None)`` once it wires the seam.
+        See the REQUIRED SEAM in the module docstring.
+    """
+    prof = Profile(
         id=cfg.id,
         label=cfg.label,
         service_uuid=cfg.service_uuid,
@@ -309,3 +426,9 @@ def make_profile(cfg: UniTProfile, meter: UniTMeter) -> Profile:
         set_walk=meter.set_walk,
         function_codes=(cfg.function_codes or None),
     )
+    # Seam: the server hands the profile its thread-safe push fn here so the
+    # handshake-then-stream tick can self-push. ``base.Profile.on_start`` is now a
+    # real field and ``gatt_server.MeterServer.start`` calls it after the notify char
+    # is live; ``tick`` then self-pushes the periodic stream once GET_DATA arms it.
+    prof.on_start = meter.on_start
+    return prof

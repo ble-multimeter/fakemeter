@@ -53,10 +53,12 @@ def test_flag_roundtrip(flag):
     assert decode_ut171(ut171.encode(r)).flags[flag] is True
 
 
-def test_start_returns_measurement():
-    # START (cmd 0x0A) is our get_data_op.
+def test_start_arms_stream_and_returns_first_measurement():
+    # START (cmd 0x0A) is our get_data_op. Handshake-then-stream: it ARMS streaming.
+    ut171._METER.stop_stream()
     resp = ut171.command(bytes([0xab, 0xcd, 0x01, 0x00, 0x0a, 0x0a, 0x00]))
     assert resp is not None and checksum_ok(resp)
+    assert ut171._METER.streaming is True
 
 
 def test_profile_polled():

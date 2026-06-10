@@ -38,11 +38,14 @@ def test_overload():
     assert d.overload is True
 
 
-def test_get_data_and_hold_seam():
+def test_get_data_arms_stream_and_hold_seam():
     ut202bt.reset_state(Reading(value=12.34, function="ACA", decimals=2, auto=True))
     ut202bt.set_walk(False)
+    ut202bt._METER.stop_stream()
+    # GET_DATA arms the stream + returns the first measurement frame.
     data = ut202bt.command(bytes([0xab, 0xcd, 0x03, 0x5d, 0x01, 0xd8]))
     assert data is not None and len(data) == 19
+    assert ut202bt._METER.streaming is True
     # RANGE + HOLD are the only generic controls; HOLD = 0x4A.
     held = ut202bt.command(bytes([0xab, 0xcd, 0x03, 0x4a, 0x01, 0xc5]))
     assert decode_uni_t(held).flags["hold"] is True
