@@ -58,23 +58,46 @@ low_battery→BATTERY, auto→AUTO, DIODE→DIODE, CONT→HORN+OHM. The profile'
 self-addressing nibble layout (`((i+1)<<4)|nibble`, MSB-first bit order) matches the
 app's `getInt`(hi-nibble slot)/`getSeg`(lo-nibble, `substring(4,8)`) exactly. No change.
 
-### Live validation — NOT done this session (adapter busy, per radio coordination)
-All non-radio work is complete (install + decompile + CCCD go/no-go + profile
-byte-correctness + the bdm fix). The **live emulator run was NOT performed**: at the
-time, `hci0` had an active LE PERIPHERAL connection (`48:F3:3F:F7:C2:DF`) and the
-adapter is single-tenant / in use by the UNI-T validation agent — per the explicit
-"do NOT disrupt / wait and retry" constraint, no emulator was started (no `pkill`, no
-collision). Both apps WRITE the CCCD, so when the radio frees up the live run is a
-plain BlueZ-path GO (no `cap_net_raw`). **To finish live (you-run, adapter free):**
-```
-cd /home/mannes/projects/ai-slop/fake-ble-meter && source .venv/bin/activate
-# bdm:
-mkfifo /tmp/fm2.fifo; python -m fakemeter --profile bdm --name BDM-FAKE 0<>/tmp/fm2.fifo > /tmp/fm2.log 2>&1 &
-#   open "Bluetooth DMM" (com.yscoco.wyboem), scan+connect BDM-FAKE, confirm the live
-#   reading (4.200 V DC) on-screen AND that it changes when you change the emulated value
-#   (REPL `v`); the AB_300 fix should now show the correct UNIT (V/kΩ/mA), not blank/Hz.
-# ai-care: same pattern, --profile ai-care --name AICARE-FAKE; open INTELLIGENT MULTIMETER.
-```
+### bdm — LIVE-VALIDATED on the "Bluetooth DMM" app as an AN9002 (2026-06-10, later)
+**DONE live, on-screen confirmed.** The bdm emulator drives the official **Bluetooth
+DMM** app (`com.yscoco.wyboem`) to a **CORRECT, LIVE, walking reading**. No profile
+change was needed — the already-committed AB_300 (descrambled byte[2]=0x03) fix renders
+the right unit on the real app. **23/23 `tests/test_bdm.py` green; py_compile clean.**
+
+- **Advertised name that the app ACCEPTED: `Bluetooth DMM`** (exact match REQUIRED).
+  The app's scan/add screen (`NewEquipmentActivity.scan`, L161) only `addItem`s devices
+  whose `getName()` `.equals("ZY")` **or** `.equals("Bluetooth DMM")` — an EXACT-match
+  gate (same quirk as the UNI-T app). So `--name AN9002` is FILTERED OUT and never
+  lists; you MUST advertise exactly `Bluetooth DMM` (or `ZY`). The **AN9002 identity is
+  carried by the device-type byte (0x03 / AB_300), NOT the advert name** — the app's
+  base scan filter is otherwise open (`scan(null, ScanNameType.ALL)` → null name filter
+  passes any named device; `is_UUID_Filter` defaults false), but the activity-level
+  name allowlist is the real gate. Run it as:
+  `python -m fakemeter --profile bdm -v --name "Bluetooth DMM" 0<>/tmp/fmb.fifo`.
+- **CCCD GO confirmed live**: `notify START on FFF4` fired (the app's BLE lib WRITES the
+  0x2902 CCCD — plain BlueZ path, no `cap_net_raw`/injection needed); BlueZ then streams
+  the re-pushed frame @300ms. (The unsolicited no-CCCD injector armed but was never
+  needed; it lacks CAP_NET_RAW here anyway and the CCCD write made it irrelevant.)
+- **On-screen reading (screenshots captured)**: app's meter view showed **`DC 4.200 V`**
+  → **`DC 4.203 V`** → **`DC 4.209 V`** across ~2s-apart screenshots (the value-walk),
+  with a live analog gauge + trend graph (AVG/MIN/MAX climbing) — genuinely live, not a
+  static template. **Unit + DC mode render CORRECTLY → the device-type=0x03 fix is
+  proven on the real app** (byte2=0 would have shown blank/wrong unit per the S_5G
+  `else`-branch analysis above).
+- **Function/unit dispatch verified across families**: REPL `v 1.000 OHM k` → app
+  switched to **`1.003 kΩ`** (correct k prefix + Ω base unit, graph re-ranged, walking),
+  then back to **`4.205 V` DC** (also shown on the Management device-card tile labelled
+  "万用表1"/Multimeter 1). Confirms the AB_300 `getUnit`/`getTag` path decodes V·DC,
+  kΩ correctly — not just the volts case.
+- **Left RUNNING** on bdm advertising `Bluetooth DMM`, phone `5C:17:CF:79:B7:4C`
+  connected (AUTH ENCRYPT/bonded), default reading 4.2 V DC walking, for the human to
+  watch. Drive via `printf 'cmd\n' > /tmp/fmb.fifo`; log at `/tmp/fmb.log`.
+
+### ai-care live validation — still TODO (not run this session)
+ai-care (`aicare.net.cn.iMultimeter`, INTELLIGENT MULTIMETER) remains byte-verified +
+CCCD-GO but NOT live-run. To finish: `python -m fakemeter --profile ai-care --name
+AICARE-FAKE …` (check its scan filter for a required name first), open the app, confirm
+the live reading.
 
 
 ## SOLVED — no-CCCD (unsolicited) notification delivery via raw-HCI ATT injection (2026-06-10)
@@ -649,4 +672,24 @@ model command map; the server already supports polled).
   AVG=6, RMR=7, Loz=8, LPF=9, Peak=10, Cosφ=12, AC=13, DC=14, USB=15, Err=16,
   INRUSH=17, OSC=18). The driver's MSB-first read is WRONG; read LSB-first.
 
-_Nothing here is committed. Per repo memory: don't git-commit markdown unless asked._
+---
+
+## Open items — check tomorrow
+
+**Live screenshots still owed** (code is done + decode-verified; just need the on-screen run):
+- [ ] **ai-care** — its app writes the CCCD → normal BlueZ path (no cap_net_raw). Quick agent run, same as bdm. Confirm the self-addressing frame renders the right value/unit on INTELLIGENT MULTIMETER.
+- [ ] **owon-plus + owon-old** — the OWON BLE4.0 app never writes the CCCD, so live needs the raw-HCI injection path, run OUTSIDE the harness with CAP_NET_RAW:
+      `sudo setcap cap_net_raw+ep "$(readlink -f .venv/bin/python)"` then `python -m fakemeter --profile owon-plus -v --name OWON-PLUS-FAKE` (owon-old: `--profile owon-old`), connect OWON BLE4.0.
+
+**UNI-T per-model coverage** (only UT60BT/UT161 + ut202bt are live-proven):
+- [ ] ut117c / ut171 / ut181a / ut219p — their own 16-bit-len encoders + units are unvalidated against their apps; per-model sweep needed.
+- [ ] ut219p is partial (standard live-data frame only; daoPos→param dispatch + device-info/battery-gate handshake deferred). ut181a is MAIN-block only (secondary block + datalog deferred). Both need a hardware capture.
+
+**Driver repo (uni-t-mmu-ble):**
+- [ ] Driver fixes are on branch `emulator-validated-driver-fixes` (41657f2), NOT on main — review + PR/merge (voltcraft R10W rewrite, owon-old byte6+nano, owon-plus verify, types.ts `app-verified` tier, protocol docs).
+- [ ] Confirm owon-old.ts byte6/nano renders live once the OWON cap_net_raw run is done (currently decode-verified only).
+
+**Housekeeping:**
+- [ ] Neither repo has a git remote yet — set up + push when ready.
+
+**Quirks to remember:** vendor scan filters are exact-name allowlists (bdm app: only `Bluetooth DMM`/`ZY`; UNI-T: exact model names like `UT60BT`) — the *model identity* lives in the frame (bdm device-type byte=0x03 AB_300), not the advert name. The harness SIGKILLs (exit 144) any bluez process it spawns, so live runs need the user's own terminal (or an agent's run_in_background+FIFO), and CAP_NET_RAW for the no-CCCD path.
