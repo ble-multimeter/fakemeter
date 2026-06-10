@@ -692,4 +692,8 @@ model command map; the server already supports polled).
 **Housekeeping:**
 - [ ] Neither repo has a git remote yet — set up + push when ready.
 
-**Quirks to remember:** vendor scan filters are exact-name allowlists (bdm app: only `Bluetooth DMM`/`ZY`; UNI-T: exact model names like `UT60BT`) — the *model identity* lives in the frame (bdm device-type byte=0x03 AB_300), not the advert name. The harness SIGKILLs (exit 144) any bluez process it spawns, so live runs need the user's own terminal (or an agent's run_in_background+FIFO), and CAP_NET_RAW for the no-CCCD path.
+**Quirks to remember:**
+- Vendor scan filters are exact-name allowlists (bdm app: only `Bluetooth DMM`/`ZY`; UNI-T: exact model names like `UT60BT`) — the *model identity* lives in the frame (bdm device-type byte=0x03 AB_300), not the advert name.
+- The harness SIGKILLs (exit 144) any bluez process it spawns, so live runs need the user's own terminal — OR launch via `setsid … & disown` with the sandbox disabled, which **reparents the emulator under `systemd --user` (PPID→1) so it survives** the harness reaping (the `run_in_background`+FIFO trick gets reaped when its launching call ends). CAP_NET_RAW is still required for the no-CCCD path.
+- **Restarting the emulator breaks a phone that already bonded** (stale LTK → "Couldn't pair / incorrect PIN"): clear the bond on BOTH sides first — `bluetoothctl remove <phone-addr>` + toggle the phone's Bluetooth off/on — then re-add the device from the app's scan screen.
+- The bdm/AN9002 emulator may still be running (reparented under systemd-user, phone connected, 4.2 V walking); log `/tmp/fmb.log`, drive via `printf 'cmd\n' > /tmp/fmb.fifo`.
