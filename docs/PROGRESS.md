@@ -2,6 +2,69 @@
 
 A BLE peripheral emulator that impersonates multimeters so their official phone apps connect to it, letting us use the vendor app as a **hardware-free decode oracle** to verify the `uni-t-mmu-ble` BLE drivers. Primary current target: the **Voltcraft VC800/VC900** app (an OWON Flutter rebadge) to verify/fix `packages/protocol/src/drivers/voltcraft.ts` — in particular settling its suspected MSB-vs-LSB flag-bit-order bug via a live "bit-sweep".
 
+## ai-care LIVE-VALIDATED on INTELLIGENT MULTIMETER app — required ADVERT MANUFACTURER-DATA gate (2026-06-11)
+
+ai-care (`aicare.net.cn.iMultimeter`, "INTELLIGENT MULTIMETER") is now **live-validated,
+on-screen confirmed**, with a CORRECT, LIVE, REPL-drivable reading. **262/262 tests green
+(260 prior + 2 new ai-care manufacturer-data tests); py_compile clean.**
+
+### THE REAL SCAN GATE — it is NOT a device-name allowlist (the handoff's assumption was wrong)
+Unlike bdm/UNI-T (exact advertised-name allowlists), the ai-care app **ignores the local
+name entirely** and gates its scan on **advertised Manufacturer-Specific-Data**. From the
+decompile (`BleProfileServiceReadyActivity.onLeScan` + `scandecoder/ScanRecord.java` +
+`utils/ParseData.java`), `onLeScan` connects (`startConnectService`) ONLY when BOTH:
+1. the advert's Service-UUIDs contain **FFB0**, AND
+2. a Manufacturer-Specific-Data field satisfies
+   `data[0]==0xAC && data[1]==0xFF && ParseData.getAddress(data) == device.getAddress()`,
+   where `getAddress` takes the **LAST 6 bytes and reverses them** into the uppercase MAC.
+There is NO device-name filter (the name is passed straight through to `startConnectService`).
+(Note: the app's bundled `ScanRecord.parseFromBytes` is the AOSP copy; jadx mis-decompiles
+the service-UUID line as `!arrayList.isEmpty() ? null : arrayList` — the real AOSP logic is
+`isEmpty() ? null : list`, so service-UUID parsing is fine.)
+
+### FIX — the emulator now advertises Manufacturer-Specific-Data
+The emulator never advertised manufacturer data before. Added:
+- `base.Profile.manufacturer_data: Optional[Callable[[adapter_addr], (company_id, payload)|None]]`
+  — a generic optional advert hook (None for every other profile, unchanged).
+- `gatt_server._build`: after building the peripheral, if the profile sets the hook, call
+  `periph.advert.manufacturer_data(company_id, payload)` (bluezero's `Advertisement.GetAll`
+  DOES emit `ManufacturerData` when set, so BlueZ broadcasts it).
+- `ai_care.manufacturer_data(adapter_addr)` returns `(0xFFAC, mac_octets_little_endian)`.
+  BlueZ prepends the company id (`0xFFAC` → on-air bytes **AC FF**), and the payload is the
+  6 MAC octets REVERSED, so on air the field is `AC FF <mac-rev>` and the app's `getAddress`
+  reverses the last 6 back to the real MAC. For hci0 (`44:AF:28:A5:53:1A`) the advertised
+  manufacturer payload is `1a 53 a5 28 af 44`. Tests `test_ai_care.py`:
+  `test_manufacturer_data_encodes_mac_for_app_scan_gate` + `_rejects_malformed_addr`.
+NO encoder/decoder change — the frame format was already byte-correct; only the *advert* was
+missing the scan-gate key.
+
+### Second gotcha — the live display only updates after pressing "Start"
+After connect+subscribe the big readout stayed `0.0.0.0` even though frames streamed. Cause
+(decompile `MultimeterManager.onCharacteristicChanged`): each frame is parsed + buffered, but
+the UI callback `mCallbacks.onGetData(...)` (which updates the display) is only posted **when
+`isStarted == true`** — i.e. after the user taps the green **Start** button. Tap Start →
+live reading appears (the green Start button is the default-enabled state, NOT a connection
+indicator). CCCD = `ENABLE_NOTIFICATION_VALUE` (notification, despite the method name
+`enableAicareIndication`), so our `notify` char flag is correct.
+
+### On-screen results (screenshots `/tmp/ai-05..08-*.png`)
+- **4.207 V** DC (walking 4.188–4.236, V lit) — live value-walk, gauge auto-ranged 0–40.
+- REPL `v 1.000 OHM k` → **0.991 KΩ** (K+Ω lit, gauge re-ranged 0–4) — proves live
+  value-change + function/unit dispatch (the decisive liveness test).
+- REPL `walk off; v 12.50 V_AC` → **012.5** with **AC** annunciator + V lit (Max/Min/Avg
+  frozen at 12.5, confirming walk-off) — AC/DC dispatch confirmed.
+- REPL `f hold` → **DH** (Data Hold) annunciator lit, value held — `hold → DH/HOLD` confirmed.
+
+### Infra notes (same host as the OWON work)
+- hci0 LE-only (`bredr off`) from the OWON session — left as-is; ai-care has no auth/bond so
+  no LTK issues. The app discovers + connects over LE cleanly via the manufacturer-data gate.
+- **Reconnect gotcha:** after the first connect/disconnect, re-foregrounding the app or
+  re-tapping **+** would NOT reconnect (stale link/GATT cache). Remediation that worked:
+  `adb shell su -c 'rm -f /data/misc/bluetooth/gatt_cache_44af28a5531a /data/misc/bluetooth/gatt_hash_*'`
+  + `cmd bluetooth_manager disable/enable` (toggle phone BT) + `am force-stop` the app, then
+  relaunch → tap the red **+** (top-right; bounds `[969,301][1052,384]`) to scan/connect.
+- Left RUNNING on ai-care advertising `AICARE-FAKE` (FIFO `/tmp/fm-ai.fifo`, log `/tmp/fm-ai.log`).
+
 ## OWON retests: owon-plus LIVE-VALIDATED, owon-old ruled LEGACY (2026-06-11)
 
 Retested both OWON profiles on the phone. Two infra blockers were solved and the
@@ -143,11 +206,11 @@ the right unit on the real app. **23/23 `tests/test_bdm.py` green; py_compile cl
   connected (AUTH ENCRYPT/bonded), default reading 4.2 V DC walking, for the human to
   watch. Drive via `printf 'cmd\n' > /tmp/fmb.fifo`; log at `/tmp/fmb.log`.
 
-### ai-care live validation — still TODO (not run this session)
-ai-care (`aicare.net.cn.iMultimeter`, INTELLIGENT MULTIMETER) remains byte-verified +
-CCCD-GO but NOT live-run. To finish: `python -m fakemeter --profile ai-care --name
-AICARE-FAKE …` (check its scan filter for a required name first), open the app, confirm
-the live reading.
+### ai-care live validation — ✅ DONE 2026-06-11 (see top section)
+ai-care is now live-validated on the INTELLIGENT MULTIMETER app. The "scan filter" turned
+out to be a **Manufacturer-Specific-Data gate (company 0xFFAC + the device's own MAC),
+NOT a device-name allowlist** — the emulator gained a generic `Profile.manufacturer_data`
+advert hook to satisfy it. Full write-up + on-screen results in the top section of this file.
 
 
 ## SOLVED — no-CCCD (unsolicited) notification delivery via raw-HCI ATT injection (2026-06-10)

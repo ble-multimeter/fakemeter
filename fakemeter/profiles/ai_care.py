@@ -37,6 +37,36 @@ FFB0_SERVICE = "0000ffb0-0000-1000-8000-00805f9b34fb"
 FFB2_NOTIFY = "0000ffb2-0000-1000-8000-00805f9b34fb"
 FFB1_WRITE = "0000ffb1-0000-1000-8000-00805f9b34fb"
 
+# --- Advertisement scan gate (the REAL go/no-go for the vendor app) -------------
+# The "INTELLIGENT MULTIMETER" app does NOT filter on the advertised local name.
+# Its scan callback (BleProfileServiceReadyActivity.onLeScan) requires BOTH:
+#   1. the advert's Service-UUIDs contain FFB0, and
+#   2. a Manufacturer-Specific-Data field whose bytes satisfy
+#        data[0] == 0xAC  &&  data[1] == 0xFF
+#        ParseData.getAddress(data) == device.getAddress()
+# where ParseData.getAddress takes the LAST 6 bytes and reverses them into the
+# uppercase MAC string. BlueZ emits manufacturer data on air as
+# [company_id_LSB, company_id_MSB, ...payload]; choosing company id 0xFFAC yields
+# the required leading AC FF, and the payload is the 6 MAC octets in REVERSED
+# (little-endian) order so getAddress reverses them back to the real MAC.
+AICARE_COMPANY_ID = 0xFFAC
+
+
+def manufacturer_data(adapter_addr: str):
+    """Build the Manufacturer-Specific-Data the app's scan gate demands.
+
+    Returns ``(0xFFAC, [mac octets, little-endian])`` so the on-air field is
+    ``AC FF <mac reversed>`` and ``ParseData.getAddress`` recovers the adapter MAC.
+    """
+    parts = adapter_addr.split(":")
+    if len(parts) != 6:
+        return None
+    try:
+        octets = [int(h, 16) for h in parts]
+    except ValueError:
+        return None
+    return AICARE_COMPANY_ID, list(reversed(octets))
+
 FRAME_LEN = 14
 BIT_LEN = FRAME_LEN * 4  # 56
 
@@ -350,6 +380,7 @@ profile = Profile(
     default_name="AICARE-FAKE",
     interaction="stream",
     encode=encode,
+    manufacturer_data=manufacturer_data,
     presets={
         "dc_volts": _preset_dc_volts,
         "ac_amps": _preset_ac_amps,

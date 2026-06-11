@@ -116,6 +116,17 @@ class Profile:
 
     default_name: str = "FAKE-METER"
 
+    # Optional manufacturer-specific advertising data. Some vendor apps gate their
+    # BLE scan on a Manufacturer-Specific-Data AD field and IGNORE the local name —
+    # the ai-care "INTELLIGENT MULTIMETER" app's onLeScan requires company id 0xFFAC
+    # (on-air bytes AC FF ...) whose last 6 payload bytes encode the device's OWN BD
+    # address (ParseData.getAddress reverses them back to the MAC). Given the
+    # adapter's BD address string ("AA:BB:CC:DD:EE:FF"), return
+    # ``(company_id, payload_bytes)`` to advertise, or None for no manufacturer data.
+    # BlueZ prepends the company id to the payload on air, so the payload is just the
+    # vendor-defined bytes (e.g. the 6 MAC octets). None => no manufacturer data.
+    manufacturer_data: Optional[Callable[[str], Optional[tuple]]] = None
+
     # INTERACTION MODE seam — how the app drives the meter:
     #   'stream' : the meter FREE-STREAMS frames on the notify char as soon as the
     #              app subscribes (the OWON/bdm/ai-care families). The server runs

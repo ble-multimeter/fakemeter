@@ -161,6 +161,19 @@ class MeterServer:
                 read_callback=self._on_info_read,
             )
 
+        # Optional manufacturer-specific advertising data. Some vendor apps gate
+        # their BLE scan on it and ignore the local name (ai-care requires company
+        # 0xFFAC + the device's own BD address — see Profile.manufacturer_data).
+        md_hook = getattr(p, "manufacturer_data", None)
+        if md_hook is not None:
+            spec = md_hook(self.adapter_addr)
+            if spec is not None:
+                company_id, payload = spec
+                periph.advert.manufacturer_data(company_id, list(payload))
+                log.info("[%s] advertising manufacturer data company=0x%04X "
+                         "payload=%s", self.adapter_id, company_id,
+                         bytes(payload).hex())
+
         self._periph = periph
 
     # -- callbacks ----------------------------------------------------------

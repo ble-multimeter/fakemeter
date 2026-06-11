@@ -154,3 +154,23 @@ def test_command_hold_freezes():
     ai_care.command(bytes([ai_care.CMD_HOLD]))
     d2 = decode_ai_care(ai_care.current_frame())
     assert d2.flags["hold"] is False
+
+
+def test_manufacturer_data_encodes_mac_for_app_scan_gate():
+    """The INTELLIGENT MULTIMETER app's scan gate (onLeScan) requires the advert's
+    Manufacturer-Specific-Data to be AC FF + the device's own MAC, where the app's
+    ParseData.getAddress takes the LAST 6 bytes and reverses them into the MAC.
+    Reproduce that here and assert the recovered MAC equals the adapter address."""
+    mac = "44:AF:28:A5:53:1A"
+    company_id, payload = ai_care.manufacturer_data(mac)
+    assert company_id == 0xFFAC  # on air -> leading bytes AC FF (LSB-first)
+
+    # On air the field is [AC, FF, *payload]; mimic the app's ParseData.getAddress:
+    on_air = [0xAC, 0xFF] + list(payload)
+    last6 = on_air[-6:]
+    recovered = "".join(f"{b:02X}" for b in reversed(last6))
+    assert recovered == mac.replace(":", "")  # == device.getAddress(), uppercased
+
+
+def test_manufacturer_data_rejects_malformed_addr():
+    assert ai_care.manufacturer_data("not-a-mac") is None
