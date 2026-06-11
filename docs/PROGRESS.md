@@ -2,6 +2,56 @@
 
 A BLE peripheral emulator that impersonates multimeters so their official phone apps connect to it, letting us use the vendor app as a **hardware-free decode oracle** to verify the `uni-t-mmu-ble` BLE drivers. Primary current target: the **Voltcraft VC800/VC900** app (an OWON Flutter rebadge) to verify/fix `packages/protocol/src/drivers/voltcraft.ts` — in particular settling its suspected MSB-vs-LSB flag-bit-order bug via a live "bit-sweep".
 
+## OWON retests: owon-plus LIVE-VALIDATED, owon-old ruled LEGACY (2026-06-11)
+
+Retested both OWON profiles on the phone. Two infra blockers were solved and the
+owon-old vs owon-plus question was settled definitively via prior art.
+
+**Infra fixes (both needed for any OWON app on this bluezero host):**
+- **Dual-mode BR/EDR wall** — the OWON apps `connectGatt(AUTO)`; our dual-mode `hci0`
+  made Android connect over Bluetooth *Classic* and auto-bond, blocking LE GATT. Fix:
+  `sudo btmgmt --index 0 bredr off` (LE-only, reversible) **+** clear the phone's cached
+  device record (`rm /data/misc/bluetooth/gatt_cache_44af28a5531a`, toggle phone BT) so
+  AUTO resolves to LE. Without the cache clear, Android keeps the device typed DUAL and
+  still picks Classic (then just fails). Requires the phone-side clear, not only the host.
+- **App choice is the CCCD gate** — the **OWON BLE4.0 Java app NEVER writes the FFF4
+  CCCD** (no live render on a bluezero peripheral; the in-emulator raw-HCI injector is
+  unproven over-air — the only prior proof used an external root/docker injector). The
+  **OWON iMeter Flutter app (`com.owon.imeter`, iMeter 1.2.4) DOES write the CCCD** →
+  streams via BlueZ's normal path. Use iMeter for OWON live validation. xapk at
+  `~/Downloads/owon iMeter_1.2.4_APKPure.xapk` (install splits base+armeabi_v7a+en+mdpi;
+  grant FINE_LOCATION/BLUETOOTH_SCAN/CONNECT; launcher `.MainActivity`).
+
+**owon-plus (series 18): ✅ live-validated AND real-hardware-corroborated.** iMeter shows
+a clean walking `DC 4.196→4.205 V`. AND a real physical **OWON B35T+** is confirmed to
+stream this exact 6-byte binary format via the community gatttool reader
+`github.com/53845714nF/OWON_B35T` (its `(w>>6)&0xF`/`(w>>3)&7`/`w&7` + function-bitmask +
+low15-mag/bit15-sign decode is bit-exact with `owon_plus`). The "+" meters (B35T+/B41T+)
+are binary = owon-plus.
+
+**owon-old (series 35, 14-byte ASCII): ⚠️ byte-correct but LEGACY/VESTIGIAL — candidate
+for removal.** Our encoder is byte-exact vs the reference `decodeOwonOld`/Windows
+`b35tDecodeOld`/BLE4.0 `handleReceivedData_B35` (31/31 round-trip green) — NOT the issue.
+But it has no live oracle and no real-world corroboration:
+- iMeter mis-decodes it with its **binary R2W parser** (our owon-old `4.200 V` frame →
+  `12.8 mV`, where 128 = our byte10 `0x80` read as the value word) — iMeter has an ASCII
+  path (`usesAsciiDigits`/`_b35b41Keys`) but only for binary "+" models; **no legacy B35T
+  ASCII model exists in iMeter** (couldn't extract its `_owSeriesKeys` map — iMeter ships
+  armv7-only and blutter can't decompile 32-bit ARM).
+- The BLE4.0 app has the correct ASCII decoder but the no-CCCD wall → can't render live.
+- The Windows app's README says only "+ type" devices were ever tested; **no real B35T
+  ASCII hardware dump exists anywhere in the community** — every real meter is binary.
+- Recognition prior art: Windows app = MANUAL device-type dropdown; phone apps = FFF2
+  series id; **our driver = content sniffing (`looksLikeOwonOldFrame`) — the robust one.**
+
+**Decision: keep `owon_old` for now but flagged for likely removal** (stance recorded in
+`fakemeter/profiles/owon_old.py` docstring) — it models a meter generation that appears
+extinct in the wild and has no app/hardware oracle. `owon_plus` is the OWON workhorse.
+
+**Possible follow-up (separate infra task, NOT owon-old-specific):** make the in-emulator
+no-CCCD raw-HCI injector actually deliver over-air to a real app (currently unverified) —
+would unblock any CCCD-less Java app, not just owon-old. Deferred.
+
 ## bdm + ai-care validation vs their official vendor apps (2026-06-10)
 
 Validated the **bdm** and **ai-care** profiles against the official Android apps via

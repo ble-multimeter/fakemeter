@@ -1,4 +1,24 @@
-"""owon-old profile — the legacy OWON B35T(+) plain-ASCII protocol.
+"""owon-old profile — the legacy OWON B35T (old, pre-'+') plain-ASCII protocol.
+
+STANCE / STATUS (2026-06-11) — **LEGACY/VESTIGIAL; candidate for removal.** This
+14-byte ASCII protocol is byte-correct vs its reference decoders (the Windows app's
+``b35tDecodeOld`` and the OWON BLE4.0 app's ``handleReceivedData_B35`` — round-trip
+tests green), but it has **no real-world corroboration and no live oracle**:
+  * Every *real* OWON meter anyone in the community has (B35T+, B41T+, OW18x, …)
+    streams the **6-byte BINARY** format = the ``owon-plus`` profile, NOT this ASCII
+    one. Confirmed against physical B35T+ hardware via the community reader
+    ``github.com/53845714nF/OWON_B35T`` (gatttool-verified) — its decode is bit-exact
+    with ``owon_plus``. The "+" in B35T+/B41T+ *is* the switch to binary.
+  * The only app that decodes this ASCII format is the **old** OWON BLE4.0 Java app,
+    which never writes the FFF4 CCCD → a BlueZ peripheral can't stream to it (the
+    no-CCCD wall), so it can't live-render. The newer iMeter Flutter app writes the
+    CCCD but has no ASCII decoder (it mis-applies its R2W binary parser → garbage).
+  * So this profile is byte-verified only; it cannot be live-validated on any app we
+    have, and likely models a meter generation that's effectively extinct in the wild.
+**Decision: keep for now (the vendor BLE4.0 app proves the ASCII format once existed,
+and the driver's ``looksLikeOwonOldFrame`` content-sniff cheaply recognizes it), but
+CONSIDER REMOVING it later if no real B35T-ASCII hardware ever surfaces.** ``owon_plus``
+is the validated OWON workhorse (iMeter-live + real-hardware-corroborated).
 
 REAL PROTOCOL — the **14-byte ASCII** measurement frame (CR/LF terminated). This
 module is the encoder INVERSE of the driver-repo decoder ``decodeOwonOld`` in
