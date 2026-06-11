@@ -227,7 +227,7 @@ class Controller:
     def send_raw_cmd(self, cmd: str) -> None:
         """`raw <hexbytes>` — push arbitrary bytes on the notify char verbatim.
 
-        For empirically reverse-engineering the on-wire frame layout against the
+        For empirically mapping the on-wire frame layout against the
         live vendor app (set a byte, read the phone). Hex may contain spaces.
         """
         parts = cmd.split(None, 1)

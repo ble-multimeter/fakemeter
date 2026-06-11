@@ -3,8 +3,8 @@
 REAL PROTOCOL — the **6-byte little-endian R2W** measurement frame. This module is
 the encoder INVERSE of the driver-repo decoder ``decodeOwonPlus`` in
 ``uni-t-mmu-ble/packages/protocol/src/drivers/owon-plus.ts`` (and its annotated
-``docs/protocols/owon-plus.md``), which was byte-verified against the OWON BLE4.0
-Android app (``com.owon.MultimeterBLE`` ``handleReceivedData_common``). The flag
+``docs/protocols/owon-plus.md``), confirmed by live analysis against the OWON BLE4.0
+Android app (``com.owon.MultimeterBLE``). The flag
 bit order was corrected LSB-first (uni-t-mmu-ble commit 4506bdc) — HOLD = bit 0.
 
 LAYERING: the OWON-shared handshake (FFF1 MD5 auth, FFF2 series gate, FFF3 button
@@ -24,7 +24,7 @@ FFF4. One notification == one frame. Three LITTLE-endian u16 words:
     bytes[2..3]  mode    : annunciator bitmask, LSB-first (HOLD=bit0 …)
     bytes[4..5]  measurement : low 15 bits magnitude, bit15 = negative sign
 
-VALUE rendering (parseMeasureValue, owon-plus.ts:122-141): the magnitude is a
+VALUE rendering (owon-plus.ts value-render path, owon-plus.ts:122-141): the magnitude is a
 digit string padded to >=4 digits, and a decimal point is inserted ``point`` chars
 from the END of that string (C# ``String.Insert(Length - point, ".")``). So a
 ``point``-place decimal display of value V uses magnitude = round(|V| * 10**point),

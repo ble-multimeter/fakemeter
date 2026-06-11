@@ -107,7 +107,7 @@ encoder + a `UniTProfile` config (see `ut202bt.py` for the minimal example —
 it reuses `uni_t.encode` wholesale).
 
 **The model is HANDSHAKE-THEN-STREAM, not reply-per-poll** (corrected 2026-06-10;
-verified against the driver + the decompiled Smart Measure app — see PROGRESS.md):
+verified against the driver + confirmed live with the Smart Measure app — see PROGRESS.md):
   - **Different request opcodes → different frame KINDS.** The app writes `GET_NAME`
     and waits for a *control/name* frame, THEN writes `GET_DATA` and waits for a
     *measurement* frame. `UniTMeter.command` branches on the opcode: GET_NAME → name

@@ -2,7 +2,7 @@
 
 STANCE / STATUS (2026-06-11) — **LEGACY/VESTIGIAL; candidate for removal.** This
 14-byte ASCII protocol is byte-correct vs its reference decoders (the Windows app's
-``b35tDecodeOld`` and the OWON BLE4.0 app's ``handleReceivedData_B35`` — round-trip
+``b35tDecodeOld`` and the OWON BLE4.0 app's B35 ASCII decode — round-trip
 tests green), but it has **no real-world corroboration and no live oracle**:
   * Every *real* OWON meter anyone in the community has (B35T+, B41T+, OW18x, …)
     streams the **6-byte BINARY** format = the ``owon-plus`` profile, NOT this ASCII
@@ -24,12 +24,12 @@ REAL PROTOCOL — the **14-byte ASCII** measurement frame (CR/LF terminated). Th
 module is the encoder INVERSE of the driver-repo decoder ``decodeOwonOld`` in
 ``uni-t-mmu-ble/packages/protocol/src/drivers/owon-old.ts`` (and its annotated
 ``docs/protocols/owon-old.md``), cross-checked against the OWON BLE4.0 Android app
-(``com.owon.MultimeterBLE`` ``handleReceivedData_B35``).
+(``com.owon.MultimeterBLE``) B35 ASCII decode.
 
 NANO-PREFIX DISCREPANCY (encoded CORRECTLY here): the driver ties the nano ('n')
 prefix to ``byte10 bit2 && byte9 == 0`` (owon-old.ts:142) — which renders "nF"
 correctly only by coincidence (the farad bit IS byte10.2). The vendor app's
-``handleReceivedData_B35`` reads nano from ``byte8 bit1`` (BIT_NANO=2) — a separate
+B35 ASCII decode reads nano from ``byte8 bit1`` (BIT_NANO=2) — a separate
 bit. THIS ENCODER writes nano at the CORRECT location (byte8.1). The bundled oracle
 ``tests/decode_owon_old.py`` therefore reads nano from byte8.1 too, so the
 round-trip is against the app-correct behaviour, NOT the buggy driver line.
@@ -131,8 +131,9 @@ STATE_BITS = {
 def _point_byte(decimals: int) -> int:
     """byte6 value for a `decimals`-place display.
 
-    APP-TRUE encoding (decompiled ``handleReceivedData_B35``): the real OWON BLE4.0
-    Android app reads byte6 as an **ASCII digit**, NOT a bitmask:
+    APP-TRUE encoding (matches the OWON BLE4.0 app's B35 ASCII decode, confirmed
+    live): the real OWON BLE4.0 Android app reads byte6 as an **ASCII digit**, NOT a
+    bitmask:
         byte6 == '1' (0x31) -> 3 decimals (X.XXX)
         byte6 == '2' (0x32) -> 2 decimals (XX.XX)
         byte6 == '4' (0x34) -> 1 decimal  (XXX.X)
@@ -302,7 +303,7 @@ def _preset_bitsweep() -> list[Reading]:
 # Interactive layer — the OWON-shared handshake + meter-generic state machine.
 #
 # series id 35 -> the B35 14-byte ASCII path (the OWON Android app routes
-# "series 35 without flash" to handleReceivedData_B35; see owon-ble app-reference).
+# "series 35 without flash" to the B35 ASCII decode path; see owon-ble app-reference).
 # use_auth/use_info both True (the Android app gates on FFF1 + FFF2, like voltcraft).
 # ---------------------------------------------------------------------------
 

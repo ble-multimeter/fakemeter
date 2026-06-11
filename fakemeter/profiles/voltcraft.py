@@ -1,9 +1,10 @@
 """voltcraft profile — Voltcraft VC915/VC925 (OWON "iMeter" rebadge) BLE multimeter.
 
-REAL PROTOCOL — reverse-engineered from the official Voltcraft "series800" app
-(``com.voltcraft.series800`` / in-app ``com.owon.imeter`` v1.2.5), blutter dump at
-``/tmp/vc125-out``. See ``docs/voltcraft-measurement-protocol.md`` for the full
-annotated derivation. THIS SUPERSEDES the layout in the driver repo's
+REAL PROTOCOL — the R10W frame layout, derived from the ``voltcraft.ts`` driver and
+confirmed by live analysis against the official Voltcraft "series800" app
+(``com.voltcraft.series800`` / in-app ``com.owon.imeter``). See
+``docs/voltcraft-measurement-protocol.md`` for the full annotated derivation. THIS
+SUPERSEDES the layout in the driver repo's
 ``packages/protocol/src/drivers/voltcraft.ts``, which decodes a *different*,
 third-party (Windows-app) protocol generation and is wrong for the real meter.
 
@@ -39,18 +40,18 @@ download only). One notification == one frame. Each field is a 24-bit
 
 ALL OF THE BELOW WAS CONFIRMED LIVE (2026-06-10) by streaming raw frames to the
 real Voltcraft series800 app and reading its display — see the table block lower
-down. Two corrections vs. the earlier decompile-guessed layout: the words are
+down. Two corrections vs. the earlier inferred layout: the words are
 LITTLE-endian (not big-endian), and the dp/prefix/gear fields use CONSECUTIVE
 codes (0,1,2,3,…), not even-only codes.
 
-GEAR/SYMBOLS word (LE), parseGearAndCountingUnit:
+GEAR/SYMBOLS word (LE), gear/counting-unit parse:
     bits 0..2   decimal-place count (the code IS the #decimals: 0->0, 1->1dp, …)
     bits 3..5   SI-prefix code: 0=p 1=n 2=µ 3=m 4=(none) 5=k 6=M 7=G  (all 8 work)
     bits 6..10  gear/function code: 0=V DC 1=V AC 2=A DC 3=A AC 4=Ω 5=CAP 6=Hz
                 7=DUTY 8=°C 9=°F 10=DIODE 11=CONT 12=hFE 13=NCV
     bit  12     SECONDARY-display-active (controls whether bytes[6..11] are parsed)
 
-VALUE word (LE), parseMeasureValue:
+VALUE word (LE), measure-value parse:
     bits 0..18  count magnitude (count = word & 0x7FFFF, up to 524287)
     bits 20..22 over-range selector: 0=normal, 1="OL", 2="UL", 3="HI"
     bit  23 (== bit7 of the THIRD value byte b5)  SIGN: 1 => negative
@@ -79,7 +80,7 @@ FFF3_WRITE = owon_base.FFF3_WRITE
 FFF1_SECURE = owon_base.FFF1_SECURE  # OWON MD5 anti-counterfeit gate
 FFF2_INFO = owon_base.FFF2_INFO       # device-info: series id / battery / fw
 
-FRAME_LEN = 15  # R10W record length (ble_multimeter._r10wParseRealTimeData: cmp #0xf)
+FRAME_LEN = 15  # R10W record length (the driver's R10W real-time parser expects 15)
 
 # --- R10W lookup tables (CONFIRMED by live bit-sweep against the VC915 app) -----
 #
@@ -88,7 +89,7 @@ FRAME_LEN = 15  # R10W record length (ble_multimeter._r10wParseRealTimeData: cmp
 #
 #   * Each 24-bit word is built from 3 CONSECUTIVE bytes in LITTLE-ENDIAN order,
 #     i.e. word = b[i] | b[i+1]<<8 | b[i+2]<<16. (The earlier "24-bit big-endian"
-#     reading of the decompiled create24bits was WRONG.)
+#     reading of the 24-bit word builder was WRONG.)
 #   * The dp / prefix / gear fields are keyed with CONSECUTIVE integer codes
 #     (0,1,2,3,…), NOT the even-only (0,2,4,…) keys previously assumed.
 #
@@ -165,7 +166,7 @@ OVERRANGE_HI = 3  # "HI"
 # state word, bytes 12..14). CONFIRMED by live bit-sweep against the VC915 app:
 # the word is a straight LSB-numbered bitmask; each set bit lights its annunciator
 # in the app's top-right "Mode" box. NOTE the map starts at bit0 (HOLD), one lower
-# than the earlier (decompile-guessed) numbering.
+# than the earlier-guessed numbering.
 STATE_BITS = {
     "hold": 0,
     "rel": 1,
@@ -194,7 +195,7 @@ def _le24(word: int) -> tuple[int, int, int]:
 
 def _encode_gear_word(gear_code: int, prefix_code: int, dp_code: int,
                       secondary_active: bool = False) -> int:
-    """Pack the 24-bit gear/symbols word (inverse of R10W parseGearAndCountingUnit)."""
+    """Pack the 24-bit gear/symbols word (inverse of the R10W gear/counting-unit parse)."""
     word = (dp_code & 0x07) | ((prefix_code & 0x07) << 3) | ((gear_code & 0x1F) << 6)
     if secondary_active:
         word |= 1 << 12
@@ -202,7 +203,7 @@ def _encode_gear_word(gear_code: int, prefix_code: int, dp_code: int,
 
 
 def _encode_value_word(count: int, negative: bool, overrange: int = 0) -> int:
-    """Pack the 24-bit value word (inverse of R10W parseMeasureValue).
+    """Pack the 24-bit value word (inverse of the R10W measure-value parse).
 
     count occupies bits 0..18 (& 0x7FFFF); bits 20..22 hold the over-range selector;
     bit 23 (== bit7 of the first/most-significant byte) is the sign.
@@ -243,7 +244,7 @@ def _value_to_count_and_dp(value: float,
 def encode(reading: Reading) -> bytes:
     """Encode a Reading into a 15-byte R10W frame (the real VC915 measurement frame).
 
-    Inverse of R10wProtocolParse.parseRealTimeDataOnce. Emits a single (primary)
+    Inverse of the driver's R10W real-time-record parse. Emits a single (primary)
     display; the secondary block is left zero and the secondary-active bit (gear
     bit 12) is cleared, so the app parses only the primary measurement.
     """

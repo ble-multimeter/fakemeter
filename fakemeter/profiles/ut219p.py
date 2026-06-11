@@ -3,8 +3,8 @@
 BEST-EFFORT + PARTIALLY STUBBED. The UT219P is the most divergent UNI-T model: the
 driver (``ut219p.ts``) decodes a standard live-data frame (CMDID 0x05, cmdCode 0)
 whose primary value is a float32 LE at byte 19, but the title/unit come from an
-``daoPos -> parameter-set`` dispatch (``UTDeviceBean.setValue``) that was NOT
-decompilable and is INFERRED in the driver. The handshake is also multi-step
+``daoPos -> parameter-set`` dispatch (``UTDeviceBean.setValue``) that is INFERRED in
+the driver. The handshake is also multi-step
 (device-info 0x17, then a battery probe the app gates on, then the live poll).
 
 This profile emulates ONLY the standard ACV/ACA live-data frame: it packs the

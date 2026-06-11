@@ -1,9 +1,9 @@
 """Python port of the REAL VC915 R10W measurement-frame decoder.
 
 This is the ORACLE for the voltcraft profile's encoder: a faithful re-implementation
-of ``R10wProtocolParse.{parseRealTimeDataOnce,parseGearAndCountingUnit,parseState,
-parseMeasureValue}`` from the decompiled official Voltcraft "series800" app
-(com.owon.imeter v1.2.5; blutter dump at /tmp/vc125-out). If
+of the R10W real-time-record / gear-and-counting-unit / state / measure-value parse,
+derived from the ``voltcraft.ts`` driver and confirmed by live analysis against the
+official Voltcraft "series800" app (com.owon.imeter). If
 ``encode(reading) -> bytes -> decode(bytes)`` reproduces the value / unit / decimal
 / sign / over-range / flags, the encoder matches the app's parser BEFORE phone time.
 

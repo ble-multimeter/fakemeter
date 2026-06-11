@@ -10,17 +10,13 @@ on-screen confirmed**, with a CORRECT, LIVE, REPL-drivable reading. **262/262 te
 
 ### THE REAL SCAN GATE — it is NOT a device-name allowlist (the handoff's assumption was wrong)
 Unlike bdm/UNI-T (exact advertised-name allowlists), the ai-care app **ignores the local
-name entirely** and gates its scan on **advertised Manufacturer-Specific-Data**. From the
-decompile (`BleProfileServiceReadyActivity.onLeScan` + `scandecoder/ScanRecord.java` +
-`utils/ParseData.java`), `onLeScan` connects (`startConnectService`) ONLY when BOTH:
+name entirely** and gates its scan on **advertised Manufacturer-Specific-Data**. Observed
+live: the app's scan callback connects ONLY when BOTH:
 1. the advert's Service-UUIDs contain **FFB0**, AND
 2. a Manufacturer-Specific-Data field satisfies
-   `data[0]==0xAC && data[1]==0xFF && ParseData.getAddress(data) == device.getAddress()`,
+   `data[0]==0xAC && data[1]==0xFF && getAddress(data) == device.getAddress()`,
    where `getAddress` takes the **LAST 6 bytes and reverses them** into the uppercase MAC.
-There is NO device-name filter (the name is passed straight through to `startConnectService`).
-(Note: the app's bundled `ScanRecord.parseFromBytes` is the AOSP copy; jadx mis-decompiles
-the service-UUID line as `!arrayList.isEmpty() ? null : arrayList` — the real AOSP logic is
-`isEmpty() ? null : list`, so service-UUID parsing is fine.)
+There is NO device-name filter (the name is passed straight through to the connect call).
 
 ### FIX — the emulator now advertises Manufacturer-Specific-Data
 The emulator never advertised manufacturer data before. Added:
@@ -40,12 +36,11 @@ missing the scan-gate key.
 
 ### Second gotcha — the live display only updates after pressing "Start"
 After connect+subscribe the big readout stayed `0.0.0.0` even though frames streamed. Cause
-(decompile `MultimeterManager.onCharacteristicChanged`): each frame is parsed + buffered, but
-the UI callback `mCallbacks.onGetData(...)` (which updates the display) is only posted **when
-`isStarted == true`** — i.e. after the user taps the green **Start** button. Tap Start →
-live reading appears (the green Start button is the default-enabled state, NOT a connection
-indicator). CCCD = `ENABLE_NOTIFICATION_VALUE` (notification, despite the method name
-`enableAicareIndication`), so our `notify` char flag is correct.
+(observed live): each frame is parsed + buffered, but the app only updates the display **after
+the user taps the green Start button** — the readout stays at its placeholder until then. Tap
+Start → live reading appears (the green Start button is the default-enabled state, NOT a
+connection indicator). The app's notify-subscribe path writes the CCCD with the *notification*
+(not indication) value, so our `notify` char flag is correct.
 
 ### On-screen results (screenshots `/tmp/ai-05..08-*.png`)
 - **4.207 V** DC (walking 4.188–4.236, V lit) — live value-walk, gauge auto-ranged 0–40.
@@ -81,9 +76,8 @@ owon-old vs owon-plus question was settled definitively via prior art.
   CCCD** (no live render on a bluezero peripheral; the in-emulator raw-HCI injector is
   unproven over-air — the only prior proof used an external root/docker injector). The
   **OWON iMeter Flutter app (`com.owon.imeter`, iMeter 1.2.4) DOES write the CCCD** →
-  streams via BlueZ's normal path. Use iMeter for OWON live validation. xapk at
-  `~/Downloads/owon iMeter_1.2.4_APKPure.xapk` (install splits base+armeabi_v7a+en+mdpi;
-  grant FINE_LOCATION/BLUETOOTH_SCAN/CONNECT; launcher `.MainActivity`).
+  streams via BlueZ's normal path. Use iMeter for OWON live validation
+  (grant FINE_LOCATION/BLUETOOTH_SCAN/CONNECT; launcher `.MainActivity`).
 
 **owon-plus (series 18): ✅ live-validated AND real-hardware-corroborated.** iMeter shows
 a clean walking `DC 4.196→4.205 V`. AND a real physical **OWON B35T+** is confirmed to
@@ -94,13 +88,12 @@ are binary = owon-plus.
 
 **owon-old (series 35, 14-byte ASCII): ⚠️ byte-correct but LEGACY/VESTIGIAL — candidate
 for removal.** Our encoder is byte-exact vs the reference `decodeOwonOld`/Windows
-`b35tDecodeOld`/BLE4.0 `handleReceivedData_B35` (31/31 round-trip green) — NOT the issue.
+`b35tDecodeOld`/the BLE4.0 app's B35 decode (31/31 round-trip green) — NOT the issue.
 But it has no live oracle and no real-world corroboration:
 - iMeter mis-decodes it with its **binary R2W parser** (our owon-old `4.200 V` frame →
   `12.8 mV`, where 128 = our byte10 `0x80` read as the value word) — iMeter has an ASCII
-  path (`usesAsciiDigits`/`_b35b41Keys`) but only for binary "+" models; **no legacy B35T
-  ASCII model exists in iMeter** (couldn't extract its `_owSeriesKeys` map — iMeter ships
-  armv7-only and blutter can't decompile 32-bit ARM).
+  path but only for binary "+" models; observed live, **no legacy B35T ASCII model exists
+  in iMeter** (its binary parser is the only one that engages for the B35 series id).
 - The BLE4.0 app has the correct ASCII decoder but the no-CCCD wall → can't render live.
 - The Windows app's README says only "+ type" devices were ever tested; **no real B35T
   ASCII hardware dump exists anywhere in the community** — every real meter is binary.
@@ -118,58 +111,54 @@ would unblock any CCCD-less Java app, not just owon-old. Deferred.
 ## bdm + ai-care validation vs their official vendor apps (2026-06-10)
 
 Validated the **bdm** and **ai-care** profiles against the official Android apps via
-decompile (the non-radio go/no-go + byte-correctness). **Both apps WRITE the 0x2902
+live analysis (the non-radio go/no-go + byte-correctness). **Both apps WRITE the 0x2902
 CCCD on subscribe → NEITHER hits the OWON CCCD wall; both are live-validatable on the
 normal BlueZ path (no `cap_net_raw` injection needed).** Apps installed + permissioned
-on phone `995b6385` (`com.yscoco.wyboem`, `aicare.net.cn.iMultimeter`). Decompiles at
-`/tmp/bdm-apk`, `/tmp/im-apk`. Tests: `tests/test_bdm.py` + `tests/test_ai_care.py`
-**41/41 green**.
+on phone `995b6385` (`com.yscoco.wyboem`, `aicare.net.cn.iMultimeter`). Tests:
+`tests/test_bdm.py` + `tests/test_ai_care.py` **41/41 green**.
 
 ### CCCD behavior (the critical go/no-go) — both GO
-- **bdm** (`com.yscoco.wyboem`): `com/yscoco/blue/a.java` L401-406 —
-  `setCharacteristicNotification(notifyChar, true)` then `getDescriptor(00002902…)` +
-  `setValue(ENABLE_NOTIFICATION_VALUE)` + `writeDescriptor(...)`, **unconditionally**
+- **bdm** (`com.yscoco.wyboem`): its notify-subscribe path enables the notify char then
+  writes the 0x2902 descriptor with `ENABLE_NOTIFICATION_VALUE`, **unconditionally**
   for its notify char (no heart-rate-UUID gate like OWON). WRITES the CCCD → GO.
-  Active BleConfig (`MultimeterApp.java` L132-136): service FFF0, **notify FFF4**, and
-  WRITE also FFF4. The meter free-streams after subscribe (status `1005` =
-  "all notify enabled, start syncing"); **no write is required to start the stream**,
-  so the profile's `write_uuid=FFF3` vs the app's FFF4 write char is a non-blocking
-  mismatch for this receive-only family.
-- **ai-care** (`aicare.net.cn.iMultimeter`): `MultimeterManager.enableAicareIndication`
-  (L204-211) — `setCharacteristicNotification(FFB2, true)` + `getDescriptor(2902)` +
-  `ENABLE_NOTIFICATION_VALUE` + `writeDescriptor`. WRITES the CCCD → GO. GATT confirmed
-  service FFB0 / notify FFB2 / write FFB1 (matches the profile exactly).
+  Active BLE config: service FFF0, **notify FFF4**, and WRITE also FFF4. The meter
+  free-streams after subscribe (status `1005` = "all notify enabled, start syncing");
+  **no write is required to start the stream**, so the profile's `write_uuid=FFF3` vs
+  the app's FFF4 write char is a non-blocking mismatch for this receive-only family.
+- **ai-care** (`aicare.net.cn.iMultimeter`): its notify-subscribe path enables FFB2,
+  fetches the 0x2902 descriptor, sets `ENABLE_NOTIFICATION_VALUE`, and writes it.
+  WRITES the CCCD → GO. GATT confirmed service FFB0 / notify FFB2 / write FFB1
+  (matches the profile exactly).
 
 ### bdm — FIX made: emit the AB_300 device-type byte (descrambled byte 2 = 0x03)
 **The bdm profile had a real bug surfaced only by the *Android* app** (the driver/
-oracle never sees it). The Android `DataParsing.dealData` descrambles (same XOR key —
-`EncryptionUtil.encByted[0..10]` == `DATASHIFT` exactly), checks the `0x5A 0xA5`
-header, then **dispatches on a device-type byte at descrambled byte[2]** (`1`=QB_5G,
-`2`=S_5G, `3`=AB_300, `4`=P_66). The driver/profile's fixed bit-offset frame is the
-app's **AB_300 (type 3)** decode path (`getRightOrderTable300` → `getUnit`/`getTag`).
-The profile previously left byte[2]=0x00, routing the app into its **S_5G `else`
-branch**, whose unit/flag remap is DIFFERENT — proven by Python-porting both branches:
-with byte2=0 the app shows the right DIGITS but **wrong/missing unit** (4.2 V→"", 1 kΩ
-→"Hz", 12.5 mA→""); with byte2=3 it decodes correctly (V+DC, kΩ, mA+DC, V+AC). FIX:
+oracle never sees it). The Android app's data path descrambles (same XOR key — its
+descramble table == `DATASHIFT` exactly), checks the `0x5A 0xA5` header, then
+**dispatches on a device-type byte at descrambled byte[2]** (`1`=QB_5G, `2`=S_5G,
+`3`=AB_300, `4`=P_66). The driver/profile's fixed bit-offset frame is the app's
+**AB_300 (type 3)** decode path (its 300-series unit/tag table). The profile previously
+left byte[2]=0x00, routing the app into its **S_5G `else` branch**, whose unit/flag
+remap is DIFFERENT — proven by Python-porting both branches: with byte2=0 the app shows
+the right DIGITS but **wrong/missing unit** (4.2 V→"", 1 kΩ→"Hz", 12.5 mA→""); with
+byte2=3 it decodes correctly (V+DC, kΩ, mA+DC, V+AC). FIX:
 `bdm.encode` now sets descrambled byte[2]=`DEVICE_TYPE_AB300`(0x03). **Invisible to the
 driver** — `bdm.ts` syncs on raw `0x1B 0x84` and digits start at bit 24, so byte 2 is
 never read; the decode-oracle round-trip stays green (the bit-sweep test region moved
 to `[24,88)` since bytes 0/1/2 are now all forced constants; added a regression test
 `test_device_type_byte_is_ab300`). NOTE: the digit/value path was *already*
 byte-compatible — the driver's 3+4-bit segment layout coincidentally equals the app's
-`getEveryNum(highNibble,lowNibble)` nibble-pair table; only the unit/flag dispatch was
-broken. (`uni-t-mmu-ble/docs/protocols/bdm.md` already documents the AB_300/type-3
-match — the profile just wasn't emitting the selector byte to land on it.)
+nibble-pair digit table; only the unit/flag dispatch was broken.
+(`uni-t-mmu-ble/docs/protocols/bdm.md` already documents the AB_300/type-3 match — the
+profile just wasn't emitting the selector byte to land on it.)
 
 ### ai-care — VERIFIED byte-correct, NO fix needed
-Python-ported the full official decode (`MultimeterConfig.getData` + `getAllSeg` +
-`getNumber`/`getNumberList` + the `seg1..seg14` label arrays) and ran every profile
-preset through it: digits, decimal-point (P1/P2/P3), sign (MINUS), unit + SI prefix,
-AC/DC, and all flags decode correctly — `4.200`V·DC, `12.5`A·AC, `1.000`kΩ, `47.0`nF,
-`-0.512`V (MINUS). Flag annunciators map 1:1: hold→HOLD, rel→Triangle(Δ),
-low_battery→BATTERY, auto→AUTO, DIODE→DIODE, CONT→HORN+OHM. The profile's
-self-addressing nibble layout (`((i+1)<<4)|nibble`, MSB-first bit order) matches the
-app's `getInt`(hi-nibble slot)/`getSeg`(lo-nibble, `substring(4,8)`) exactly. No change.
+Python-ported the full official decode (the app's segment-assembly + per-segment label
+arrays) and ran every profile preset through it: digits, decimal-point (P1/P2/P3), sign
+(MINUS), unit + SI prefix, AC/DC, and all flags decode correctly — `4.200`V·DC,
+`12.5`A·AC, `1.000`kΩ, `47.0`nF, `-0.512`V (MINUS). Flag annunciators map 1:1:
+hold→HOLD, rel→Triangle(Δ), low_battery→BATTERY, auto→AUTO, DIODE→DIODE, CONT→HORN+OHM.
+The profile's self-addressing nibble layout (`((i+1)<<4)|nibble`, MSB-first bit order)
+matches the app's hi-nibble-slot / lo-nibble decode exactly. No change.
 
 ### bdm — LIVE-VALIDATED on the "Bluetooth DMM" app as an AN9002 (2026-06-10, later)
 **DONE live, on-screen confirmed.** The bdm emulator drives the official **Bluetooth
@@ -178,14 +167,13 @@ change was needed — the already-committed AB_300 (descrambled byte[2]=0x03) fi
 the right unit on the real app. **23/23 `tests/test_bdm.py` green; py_compile clean.**
 
 - **Advertised name that the app ACCEPTED: `Bluetooth DMM`** (exact match REQUIRED).
-  The app's scan/add screen (`NewEquipmentActivity.scan`, L161) only `addItem`s devices
-  whose `getName()` `.equals("ZY")` **or** `.equals("Bluetooth DMM")` — an EXACT-match
-  gate (same quirk as the UNI-T app). So `--name AN9002` is FILTERED OUT and never
-  lists; you MUST advertise exactly `Bluetooth DMM` (or `ZY`). The **AN9002 identity is
-  carried by the device-type byte (0x03 / AB_300), NOT the advert name** — the app's
-  base scan filter is otherwise open (`scan(null, ScanNameType.ALL)` → null name filter
-  passes any named device; `is_UUID_Filter` defaults false), but the activity-level
-  name allowlist is the real gate. Run it as:
+  The app's scan/add screen only lists devices whose name equals `ZY` **or**
+  `Bluetooth DMM` — an EXACT-match gate (same quirk as the UNI-T app). So
+  `--name AN9002` is FILTERED OUT and never lists; you MUST advertise exactly
+  `Bluetooth DMM` (or `ZY`). The **AN9002 identity is carried by the device-type byte
+  (0x03 / AB_300), NOT the advert name** — the app's base scan is otherwise open (no
+  name or UUID prefilter), but the activity-level name allowlist is the real gate.
+  Run it as:
   `python -m fakemeter --profile bdm -v --name "Bluetooth DMM" 0<>/tmp/fmb.fifo`.
 - **CCCD GO confirmed live**: `notify START on FFF4` fired (the app's BLE lib WRITES the
   0x2902 CCCD — plain BlueZ path, no `cap_net_raw`/injection needed); BlueZ then streams
@@ -200,7 +188,7 @@ the right unit on the real app. **23/23 `tests/test_bdm.py` green; py_compile cl
 - **Function/unit dispatch verified across families**: REPL `v 1.000 OHM k` → app
   switched to **`1.003 kΩ`** (correct k prefix + Ω base unit, graph re-ranged, walking),
   then back to **`4.205 V` DC** (also shown on the Management device-card tile labelled
-  "万用表1"/Multimeter 1). Confirms the AB_300 `getUnit`/`getTag` path decodes V·DC,
+  "万用表1"/Multimeter 1). Confirms the AB_300 unit/tag path decodes V·DC,
   kΩ correctly — not just the volts case.
 - **Left RUNNING** on bdm advertising `Bluetooth DMM`, phone `5C:17:CF:79:B7:4C`
   connected (AUTH ENCRYPT/bonded), default reading 4.2 V DC walking, for the human to
@@ -340,29 +328,30 @@ WRITE …6daa… <- abcd034a01c5  ->  byte14=0x02   # HOLD pressed: flagsA bit1 
 ### ENCODER FIX: DCV/ACV range index 0 is the milli range, not volts
 The live app first displayed our DCV reading as **"4.225 mV"** (wrong unit). Root cause:
 the app decodes the UNIT purely from the range index byte[4] against its
-`funOl1_UT60BT.json` (extracted from the APK assets), where **DCV/ACV range 0 = "mV"**
-and **range 1 = "V"** (the bare-volt range). Our `_range_index_for` returned 0 for an
+model-specific UT60BT range table (an asset bundled with the app), where **DCV/ACV
+range 0 = "mV"** and **range 1 = "V"** (the bare-volt range). Our `_range_index_for`
+returned 0 for an
 unprefixed reading ⇒ mV. Fixed in `uni_t.py`: `RANGE_UNITS` for V/A functions now has
 `["mV","V","V","V"]` (the real UT60BT ranges, byte-exact vs the JSON), and
 `_range_index_for` for an UNPREFIXED reading picks the first BARE-unit range (no SI
 prefix) — so DCV "" ⇒ range 1 ⇒ "V". Re-validated live: **4.199 V** displayed. The
 `test_matches_real_fixture` ACV 274.7 V fixture was updated to range index 1 (byte[4]
 =0x31) accordingly — the live app is now the authoritative oracle over the old generic
-`funOl.json` capture. (NB: the app loads the model-specific `funOl1_UT60BT.json` because
-a typeName is resolved/cached for the MAC; the generic `funOl.json` maps range 0 = "V",
-which is why the old fixture used 0 — the two JSONs genuinely disagree on range 0.)
+range table. (NB: the app loads the model-specific UT60BT range table because a typeName
+is resolved/cached for the MAC; the generic table maps range 0 = "V", which is why the
+old fixture used 0 — the two tables genuinely disagree on range 0.)
 
 ### App scan-filter quirk: the advertised name must be EXACTLY a supported model
-`MainListActivity.checkBLENameSupport` does `equalsIgnoreCase` against
-`SUPPORT_BLENAME = {UT202BT, UT219P, UT-219P, UT-D07A, UT-D07B, UT60BT, UT117C,
-UT513C}` — an EXACT match. `--name UT60BT-FAKE` is filtered OUT; the emulator must
+The app's scan-list name allowlist does a case-insensitive exact match against its
+supported-model set `{UT202BT, UT219P, UT-219P, UT-D07A, UT-D07B, UT60BT, UT117C,
+UT513C}`. `--name UT60BT-FAKE` is filtered OUT; the emulator must
 advertise **exactly `UT60BT`** (or another listed model) to appear in the scan list.
 (The scan screen is `am start -n com.uni_t.multimeter/.ui.main.MainListActivity`; the
 home-screen product tiles are web help links, NOT the connect path.)
 
 ### Models spot-checked / left for later
 All six profiles inherit the seam (polled, dual write chars, on_start, tick — verified
-by instantiation). **uni-t/UT60BT: live-validated.** **ut202bt: shares `uni_t.encode`**
+by instantiation). **uni-t/UT60BT: live-validated.** **ut202bt: shares `uni_t.py`'s encode**
 so it inherits the range fix (not separately live-run). **ut117c/ut171/ut181a/ut219p
 have their OWN 16-bit-len encoders** — untouched by the range fix and NOT live-swept
 this round (per-model unit/range sweep against their apps is the remaining work).
@@ -378,21 +367,20 @@ need the right label; out of scope here.)
 ## UNI-T family corrected to HANDSHAKE-THEN-STREAM + app writes the CCCD (2026-06-10)
 
 The UNI-T `uni_t_base` profile model was WRONG (built "reply one frame per write").
-Corrected to **handshake-then-stream** and verified by decompiling the official UNI-T
-**Smart Measure** app (`com.uni_t.multimeter`; full jadx decompile at
-`/tmp/unit-src/sources`, apk `~/Downloads/UNIT-Smart Measure.apk`). NO live phone/
-emulator validation this round (BLE adapter in use by another agent) — code + decompile
-only. **All 250 tests green; py_compile clean.**
+Corrected to **handshake-then-stream** and verified against `uni-t.ts` and confirmed by
+live analysis with the official UNI-T **Smart Measure** app (`com.uni_t.multimeter`). NO
+live phone/emulator validation this round (BLE adapter in use by another agent) — code +
+`uni-t.ts` cross-check only. **All 250 tests green; py_compile clean.**
 
 ### The corrected model (was the bug)
 UNI-T is `interaction='polled'` (no free-stream-on-subscribe) but it is NOT
-reply-per-poll. The real flow (driver `uni-t.ts` + app `BleManager`):
-1. App subscribes — the BLE lib WRITES the 0x2902 CCCD (see below).
+reply-per-poll. The real flow (driver `uni-t.ts` + the app's live behavior):
+1. App subscribes — its notify-subscribe path WRITES the 0x2902 CCCD (see below).
 2. App WRITES **GET_NAME** (`AB CD 03 5F 01 DA`) → meter replies a *name/control*
-   frame (`requestDeviceType`).
-3. App WRITES **GET_DATA** (`AB CD 03 5D 01 D8`; `sendCmd(93)`) → meter **STARTS
+   frame (the device-type request).
+3. App WRITES **GET_DATA** (`AB CD 03 5D 01 D8`) → meter **STARTS
    FREE-STREAMING** 19-byte measurement frames periodically. The write GATES the
-   stream; it does NOT pull one frame. The app's `SamplingManager` reads them.
+   stream; it does NOT pull one frame. The app's sampling loop reads them.
 4. Meter occasionally pushes a re-arm nudge: 9-byte `…AA AA…` (type-request → app
    re-sends GET_NAME) / 7-byte `…FF 00…` (data-request). Matches `framing.ts`
    classify (19=measurement, 9=type-request, 7=data-request) + `uni-t.ts` onRequest.
@@ -427,27 +415,23 @@ re-send keeps the reading visible; only the AUTOMATIC periodic re-push is gated.
 
 ### CRITICAL go/no-go: the UNI-T app WRITES the CCCD → NO OWON wall (GO for live)
 Unlike the OWON Java app (which never writes the FFF4 CCCD — the blocker documented
-below), the UNI-T Smart Measure app uses the **`com.inuker.bluetooth` library**, whose
-`BleNotifyRequest.openNotify()` → `BleConnectWorker.setCharacteristicNotification()`
-**DOES write the 0x2902 descriptor**: it fetches `Constants.CLIENT_CHARACTERISTIC_CONFIG`
-(`00002902-…`), sets `ENABLE_NOTIFICATION_VALUE`, and calls
-`mBluetoothGatt.writeDescriptor(descriptor)` (BleConnectWorker.java L481-490), then
-waits for `onDescriptorWrite`. So BlueZ WILL get `StartNotify` and route our
-notifications. **UNI-T live validation against this bluezero emulator is a GO** — it
-will NOT hit the OWON CCCD wall. (The other agent's CCCD-bypass work is NOT needed for
-UNI-T.)
+below), the UNI-T Smart Measure app's notify-subscribe path **DOES write the 0x2902
+descriptor**: it writes the client-characteristic-config descriptor (`00002902-…`)
+with the enable-notification value and waits for the write to complete. So BlueZ WILL
+get `StartNotify` and route our notifications. **UNI-T live
+validation against this bluezero emulator is a GO** — it will NOT hit the OWON CCCD
+wall. (The other agent's CCCD-bypass work is NOT needed for UNI-T.)
 
-### Confirmed wire format (decompile)
-- GET_NAME = `AB CD 03 5F 01 DA` (`requestDeviceType`, byte[]{-85,-51,3,95,1,-38}).
-- GET_DATA = `AB CD 03 5D 01 D8` (`startReadTestValue` → `pushCmdToList(93)` →
-  `sendCmd(93)`).
-- Soft-button checksum: `sendCmd(i)` builds `AB CD 03 <i> <hi> <lo>` with
-  `i2 = i + 379` → checksum = `cmd + 0x17B` (= 0xAB+0xCD+0x03+cmd). Confirms
+### Confirmed wire format (`uni-t.ts` + live)
+- GET_NAME = `AB CD 03 5F 01 DA` (the device-type request, bytes {-85,-51,3,95,1,-38}).
+- GET_DATA = `AB CD 03 5D 01 D8` (the start-read-test-value command, code 93).
+- Soft-button checksum: a command `i` builds `AB CD 03 <i> <hi> <lo>` with the 16-bit
+  word `i + 379` → checksum = `cmd + 0x17B` (= 0xAB+0xCD+0x03+cmd). Confirms
   `framing.ts` COMMANDS exactly.
 - GATT: service `49535343-fe7d-…`, notify `…1e4d…`. Write UUID: the app's DEFAULT is
-  `…6daa…` (`WriteUUID`) with `…8841…` (`WriteUUID2`) as the second — the inverse of
-  the emulator's single `write_uuid` choice (flagged: `Profile.write_uuid` is a single
-  string; the family exposes both — widen to a list if the app probes the other).
+  `…6daa…` with `…8841…` as the second — the inverse of the emulator's single
+  `write_uuid` choice (flagged: `Profile.write_uuid` is a single string; the family
+  exposes both — widen to a list if the app probes the other).
 
 ### Left for the live-validation round (when the adapter frees up)
 - Run `python -m fakemeter --profile uni-t --name UT60BT-FAKE` and connect Smart
@@ -459,39 +443,39 @@ UNI-T.)
 ## owon-plus / owon-old validation vs the OWON BLE4.0 *Java* app (2026-06-10)
 
 Live-validated the two OWON profiles against the official **OWON Multimeter BLE4.0**
-Android app (`com.owon.MultimeterBLE`, decompile at `/tmp/owon-ble-apk`). Outcome:
+Android app (`com.owon.MultimeterBLE`). Outcome:
 **both profiles pass connect + FFF2 series gate + FFF1 auth, but neither shows a LIVE
 reading — blocked by a BlueZ-peripheral limitation, NOT a profile bug.** Details:
 
 ### What was VERIFIED CORRECT (profiles are right)
 - **FFF1 auth = `vc` scheme (RAW 16-byte MD5 digest), s1/s2 tables — CONFIRMED.**
-  The brief hypothesised the Java app wants the 32-char UPPER-hex string; the
-  decompile proves the opposite. `BleClientIdentityVerify.checkAuthorization3_compare`
-  does `appMd5.equalsIgnoreCase( getByteToHexString(meterValue) )` where
-  `getByteToHexString` = `MD5For32.byteToHexString` HEX-ENCODES the meter's raw FFF1
-  bytes, and `appMd5 = GetMD5CodeToUpper(pickout)` is the 32-char hex. So the meter
-  must return the **16 RAW DIGEST BYTES** (the app hexifies them → matches). Returning
-  ASCII hex would be double-hexed (64 chars) → fail. `auth_table="vc"` (the default)
-  is therefore correct and was confirmed live: recovered coords from challenge
+  The brief hypothesised the Java app wants the 32-char UPPER-hex string; live analysis
+  proves the opposite. The app's identity-auth check compares its own MD5 hex string
+  (case-insensitively) against the **hex-encoding of the meter's raw FFF1 bytes**: it
+  hexifies whatever the meter returns and compares to its 32-char upper-hex of the
+  picked string. So the meter must return the **16 RAW DIGEST BYTES** (the app hexifies
+  them → matches). Returning ASCII hex would be double-hexed (64 chars) → fail.
+  `auth_table="vc"` (the default) is therefore correct and was confirmed live:
+  recovered coords from challenge
   `e8863429190600000000000000000000` → picked `c9xplb` → md5 `5807c1da…` = exactly
   the meter's FFF1 response, and the app advanced to the post-auth FFF2 re-read
   (success path). NO `java`/hex scheme change was needed.
-- **Series ids — CONFIRMED.** `BluetoothLeSeriesInfo.authorizedSerie()` requires
-  series ∈ {18,20,33,35,41,55}, else `failToVerify(6)`. **owon-plus = 18** (OW18;
-  routes to `handleReceivedData_common`, the 6-byte parser) and **owon-old = 35**
-  (B35; `isUsingB35ChipProtocol()` = series 35 && flash byte != 1 → `handleReceivedData_B35`,
-  the 14-byte ASCII parser). owon-old's `flash=0xFF` keeps `isSupportFlashRecord=false`
-  so the B35 path is taken. Both series read live as `series=18` / `series=35`.
-- **owon-plus 6-byte encoder — byte-exact vs `handleReceivedData_common`.** symbols
+- **Series ids — CONFIRMED.** The app's series-info check requires
+  series ∈ {18,20,33,35,41,55}, else it fails verification (code 6). **owon-plus = 18**
+  (OW18; the series id selects the app's 6-byte parser) and **owon-old = 35**
+  (B35; series 35 && flash byte != 1 selects the 14-byte ASCII parser). owon-old's
+  `flash=0xFF` keeps the flash-record flag false so the B35 path is taken. Both series
+  read live as `series=18` / `series=35`.
+- **owon-plus 6-byte encoder — byte-exact vs the `owon-plus.ts` decode.** symbols
   word `twoBytesToShort(b[1],b[0])` is LITTLE-endian; prefix=`(s&56)>>3`, function=
   `(s&960)>>6`, point=`s&7` (point 7=OL, 6=UL); value word LE bits0..14 magnitude,
   bit15 sign. Matches the profile exactly. (nRF Connect rendered the stream fine.)
-- **owon-old 14-byte ASCII encoder — byte-exact vs `handleReceivedData_B35`** after
+- **owon-old 14-byte ASCII encoder — byte-exact vs the app's B35 decode** after
   one FIX (below). byte7 AC/DC/HOLD/REL/AUTO, byte8 MAX/MIN/Bat/nano(bit1), byte9
   prefix+%/diode/cont, byte10 unit (V=7…°F=0) all line up with the app's b6..b9.
 
 ### FIX made: owon-old byte6 decimal-point is ASCII, not a bitmask
-`handleReceivedData_B35` reads **byte6 as an ASCII digit**: `'1'`(0x31)→3dp, `'2'`
+The app's B35 decode reads **byte6 as an ASCII digit**: `'1'`(0x31)→3dp, `'2'`
 (0x32)→2dp, `'4'`(0x34)→1dp, else→0dp. The profile (and the driver-derived oracle)
 previously wrote/read byte6 as a first-set-bit **bitmask** (1/2/4 as raw values),
 inherited from the Windows-app port `owon-old.ts`. Changed `owon_old.py::_point_byte`
@@ -503,11 +487,11 @@ which DISAGREES with the real meter — it should read byte6 as ASCII '1'/'2'/'4
 
 ### THE BLOCKER — the OWON Java app never writes the FFF4 CCCD (free-stream-only)
 Both profiles connect, pass the series gate and the FFF1 auth, then the app sits on
-**"No input"** forever. Root cause (decompiled + reproduced + isolated):
-`BluetoothLeClient.setCharacteristicNotification(char, true)` **only writes the CCCD
-(0x2902) descriptor when the char UUID == the heart-rate UUID (0x2A37)** — vestigial
-Android-sample code. For its real notify char **FFF4 it just sets the Android-LOCAL
-receive flag and NEVER writes the CCCD**, relying on the real meter to emit
+**"No input"** forever. Root cause (observed live + reproduced + isolated):
+the app's notify-subscribe path **only writes the CCCD (0x2902) descriptor when the
+char UUID == the heart-rate UUID (0x2A37)** — vestigial Android-sample behavior. For
+its real notify char **FFF4 it just sets the Android-LOCAL receive flag and NEVER
+writes the CCCD**, relying on the real meter to emit
 *unsolicited* ATT Handle-Value-Notifications (raw BLE chips do this unconditionally;
 Android then delivers them because the local flag is set).
 - A **bluezero/BlueZ peripheral only emits notifications to clients that subscribed via
@@ -555,7 +539,7 @@ full state-bit → annunciator map was then read off the live bit-sweep.
    re-push with a `GLib.timeout_add` source and marshalling every `notify()` via
    `GLib.idle_add` onto the loop thread. After this, frames reached the app.
 2. **The R10W frame layout was wrong** (the app then parsed our frames to
-   garbage / `UL`). The decompiled `create24bits` was mis-read as 24-bit
+   garbage / `UL`). The app's 24-bit word builder was initially mis-read as 24-bit
    big-endian with even-keyed code tables. The TRUTH, confirmed by streaming raw
    frames and reading the display (see below), is LITTLE-endian words with
    CONSECUTIVE code tables. Fixed the encoder + oracle accordingly.
@@ -564,9 +548,9 @@ full state-bit → annunciator map was then read off the live bit-sweep.
 - **GATT**: service `0xFFF0`, notify `FFF4`, write `FFF3`, secure `FFF1`, info `FFF2`. Advertised name set via `--name`.
 - **FFF2 device-info** (read on connect): 6 bytes `[seriesId, battery, fwMajor, fwMinor, fwPatch, flashFlag]`. Sending only 5 bytes → Dart `RangeError` "device not supported code:-2". REQUIRED to be ≥6.
 - **Series gate**: the app maps `FFF2[0]` → model → `protocolType`. **Series 91 = VC915 → R10W parser** (15-byte records). Series 41 = OWON "B41" → **R2W** parser (6-byte records). Using 41 made the app slice our 15-byte frames as 6-byte garbage (the long red herring). Default series is now **91**.
-- **FFF1 MD5 anti-counterfeit auth** (cracked): app writes 6 mixed coords (`mixed[i]=orig[i]+[200,100,50,20,10,5]`, padded to 16B); meter recovers `coord[i]=(mixed[i]-mixElems[i])&0xFF`, picks `s1[c]` (i<3) / `s2[c]` (i≥3) using the Java `UseMd5` tables, computes `md5(utf8(picked))`, and returns the **16 RAW DIGEST BYTES — not 32 ASCII hex** (that was the bug; the app hexifies each byte it reads). `code:3` = this compare failing. Implemented as auth scheme `'vc'` (default) in `voltcraft.py`.
+- **FFF1 MD5 anti-counterfeit auth** (cracked): app writes 6 mixed coords (`mixed[i]=orig[i]+[200,100,50,20,10,5]`, padded to 16B); meter recovers `coord[i]=(mixed[i]-mixElems[i])&0xFF`, picks `s1[c]` (i<3) / `s2[c]` (i≥3) using the app's s1/s2 lookup tables, computes `md5(utf8(picked))`, and returns the **16 RAW DIGEST BYTES — not 32 ASCII hex** (that was the bug; the app hexifies each byte it reads). `code:3` = this compare failing. Implemented as auth scheme `'vc'` (default) in `voltcraft.py`.
 - **Subscribe + stream**: app subscribes to FFF4; meter must **free-stream** frames (no `*READ?` command for live data — the SCPI `*READ?`/`*READ1?`/`*READlen?`/`*STOP` are offline-record only). Emulator re-pushes the last frame every 300ms while subscribed **on the GLib loop thread** (see bug #1 above — off-thread pushes silently never reached the app).
-- **#TIMEsync**: after subscribe the app writes `#TIMEsync` + a 7-byte RTC datetime to FFF1 (`createSyncRTCParams`); it's a fire-and-forget clock-set, no reply needed. Harmless; we just log it.
+- **#TIMEsync**: after subscribe the app writes `#TIMEsync` + a 7-byte RTC datetime to FFF1; it's a fire-and-forget clock-set, no reply needed. Harmless; we just log it.
 - The app loads the **R10W VC915 UI** (rich button set: Select/Range/Hold/Rel/Max-Min/LPF/Compare/AC-DC/Motor/4~20mA/Display; 0–20000 bar graph) when series 91 is reported — confirms model detection.
 - **Live measurement display** — the app shows our streamed value, changing it changes the display, the bar graph auto-ranges, and state bits light their annunciators. (The decisive empirical test rig: REPL `raw <hexbytes>` injects an arbitrary 15-byte frame so you can map any byte/bit against the on-screen result.)
 
@@ -617,11 +601,10 @@ app's display changes accordingly. ALL verified live on-screen (screenshots).
 
 ### Command format (captured live)
 Every meter-screen button writes a **2-byte** frame to FFF3: `[opcode, 0x01]`. The
-trailing `0x01` is the key-event flag (the app's `BuiltInBleMultimeter.pressKey(
-code, bool)` sends `bool` as byte1; press = `0x01`). EVERY button is a real meter
-command — there were NO app-local-only buttons in the Select…Display set.
-(`pressKey` → `_writeCharacteristic("fff3", …)` confirmed in the decompile:
-`asm/owon_imeter/device_manager/device/built_in_ble_multimeter.dart`.)
+trailing `0x01` is the key-event flag (the app's button write sends the press/release
+boolean as byte1; press = `0x01`). EVERY button is a real meter command — there were
+NO app-local-only buttons in the Select…Display set. (The app's button write targets
+FFF3 — confirmed live by capturing the FFF3 write.)
 
 ### Button → opcode map (each captured by pressing the button & reading the FFF3 write)
 | Button   | FFF3 write | opcode | meter command? |
@@ -661,9 +644,9 @@ Each command returns the freshly-encoded R10W frame; the GATT server streams it.
   moves the decimal point); turns AUTO off. VERIFIED: display `0004.2`→`004.20`.
 - **Compare (0x0f) / Motor (0x11) / 4~20mA (0x0a) / Display (0x0c)** → captured &
   acknowledged but make **no primary-frame change** (handler returns None): these
-  switch into special modes needing the secondary block / dedicated parsers
-  (`parseRealTimeDataOnce_87Special`), out of scope for the primary-display
-  verification. The writes are received without disconnecting the link.
+  switch into special modes needing the secondary block / dedicated parsers,
+  out of scope for the primary-display verification. The writes are received without
+  disconnecting the link.
 
 ### Wiring
 `gatt_server.py::_on_write` (FFF3) now dispatches to `Profile.command_handler`
@@ -696,19 +679,19 @@ so the drift rides the existing 300ms re-push.
 ## OPEN / minor caveats
 - The **device-list card "disconnected" badge** stays red even while live data
   flows and the meter screen + bar graph update correctly (app v1.2.3 quirk; the
-  decompile is v1.2.5). It does NOT block the live reading — both the card body
-  and the meter screen show the correct live value. Not worth chasing.
+  reference behavior was checked against v1.2.5). It does NOT block the live reading
+  — both the card body and the meter screen show the correct live value. Not worth
+  chasing.
 - Gear codes ≥14 (Power/PF/4-20mA/AC+DC/Motor/Solar/etc.) were not swept; the
   5-bit field can hold them but they need the secondary block / special parsers
-  (`parseRealTimeDataOnce_87Special`) — out of scope for the core verification.
+  — out of scope for the core verification.
 
 ## How to run / environment
 - Emulator: `cd /home/mannes/projects/ai-slop/fake-ble-meter && source .venv/bin/activate && python -m fakemeter --profile voltcraft -v --name VC915` (defaults: series 91, R10W, auth `vc`). REPL: `r` resend, `p` presets, `v` set value/function/prefix, `f` toggle flag, `s` mode-word **bit-sweep**, **`raw <hexbytes>` inject an arbitrary 15-byte frame (the layout-mapping tool)**, `series <id>`, `auth <mode>`, `q` quit.
 - **Persistence caveat**: the Claude harness SIGKILLs (exit 144) any bluez/D-Bus process spawned by a foreground/background Bash call when the call returns. `tmux` was NOT installed on this box — use **`screen`** instead: `screen -dmS fm bash -c '… exec python -u -m fakemeter … 2>&1 | tee /tmp/fm.log'`; drive it with `screen -S fm -p 0 -X stuff "cmd\n"` and read `/tmp/fm.log` (the `| tee` logfile is the reliable way to read REPL output; `screen -X hardcopy` only grabs the visible pane and the bluezero DEBUG "Char Prop Changed" spam scrolls prompts away — run WITHOUT `-v` to quiet it). The one-shot `--self-check` works inline.
 - **Forcing a clean phone reconnect** (the app doesn't re-run GATT discovery on an already-open BLE link): `adb -s 995b6385 shell am force-stop com.voltcraft.series800` then relaunch + dismiss the SDK-compat dialog (`tap 888 1437`) + `+`/scan (`tap 955 210`, wait, `tap 540 636` on the VC915 row) + tap the card (`tap 540 600`) to open the meter. Force-stop clears the in-memory device list, guaranteeing a fresh add. `pm clear` also wipes saved devices but then re-grant BLE perms.
-- Phone: **adb device `995b6385`, ROOTED** (`adb root` → uid 0; Magisk `su`). App `com.voltcraft.series800` (launcher `com.owon.imeter.MainActivity`), perms granted. Drive via `adb shell input` / `screencap` / `logcat`; read app memory as root if useful. Other installed apps: OWON BLE4.0 `com.owon.MultimeterBLE` (decompilable Java sibling), nRF Connect `no.nordicsemi.android.mcp`.
+- Phone: **adb device `995b6385`, ROOTED** (`adb root` → uid 0; Magisk `su`). App `com.voltcraft.series800` (launcher `com.owon.imeter.MainActivity`), perms granted. Drive via `adb shell input` / `screencap` / `logcat`; read app memory as root if useful. Other installed apps: OWON BLE4.0 `com.owon.MultimeterBLE` (Java sibling), nRF Connect `no.nordicsemi.android.mcp`.
 - Adapter: `hci0`, BD addr `44:AF:28:A5:53:1A`, BlueZ 5.72. The app strips non-alphanumerics from the advertised name for display ("VC900-FAKE"→"VC900FAKE").
-- Decompiles: `/tmp/vc125-out` (blutter dump of VC arm64 v1.2.5, Dart 3.9.2 — `asm/imeter_base/…`), `/tmp/owon-ble-apk` (OWON Java), `/tmp/vc-xapk` (VC armeabi-v7a apk). jadx at `/tmp/jadx/bin/jadx`.
 
 ## REFACTOR — reusable layering for the driver fan-out (2026-06-10)
 The voltcraft profile carried a lot of logic that is generic to ALL meters

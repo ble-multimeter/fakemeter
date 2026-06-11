@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # The unit tests are pure-Python (encoder/decoder round-trips, the
+      # interactive meter-core engine, and the raw-HCI PDU layout). They do NOT
+      # import the BLE transport (bluezero / dbus / PyGObject), so we install
+      # only pytest — pulling in bluezero would force a painful system-PyGObject
+      # build on the runner for no test benefit.
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Compile-check all modules
+        run: python -m py_compile fakemeter/*.py fakemeter/profiles/*.py
+
+      - name: Run tests
+        run: python -m pytest -q

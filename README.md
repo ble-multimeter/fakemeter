@@ -2,9 +2,9 @@
 
 A **BLE peripheral emulator** that impersonates Bluetooth multimeters so their
 official phone apps (and our own Web-Bluetooth web app) connect to it and render
-frames *we* craft. It is a **hardware-free black-box oracle** for verifying BLE
-decode logic: we push known bytes on the notify characteristic and a human reads
-how the app on a phone decodes / displays them.
+frames *we* craft. It is a **hardware-free black-box oracle** for verifying the
+`uni-t-mmu-ble` BLE decode drivers: we push known bytes on the notify
+characteristic and a human reads how the app decodes / displays them.
 
 ```
    ┌─────────────────────────┐         BLE         ┌──────────────────────────┐
@@ -21,13 +21,40 @@ how the app on a phone decodes / displays them.
             If it differs, we've found a bug (e.g. flag-bit order).
 ```
 
-The first profile is **voltcraft** (Voltcraft VC800/VC900, an OWON rebadge). Its
-frame *encoder* is the exact inverse of the `decodeVoltcraft` decoder in the driver
-repo. Its #1 job is to settle a suspected **flag-bit-order bug** (see below).
+Each profile's frame *encoder* is the exact inverse of the matching decoder in
+the driver repo, so a profile both (a) lets the vendor app act as an oracle, and
+(b) surfaces driver bugs the oracle reveals. The original goal — settling the
+**voltcraft flag-bit-order bug** — is **done** (it was reversed; see below); the
+project has since fanned out to the whole driver family.
 
 > This repo is a standalone sibling of the driver repo (`uni-t-mmu-ble`). The
 > driver repo is **read-only reference** for the byte layouts — nothing here
-> modifies it.
+> modifies it. Driver fixes this work surfaced live on a branch there.
+
+## Profiles & verification status
+
+Eleven profiles across four families. "Live-validated" = an actual reading was
+read off the real vendor app's screen; "byte-verified" = the encoder round-trips
+bit-exact against a Python port of the app's own decoder, but it hasn't been put
+on-screen yet.
+
+| Profile      | Family / format            | Vendor app (Android pkg)                 | Status | Notes / quirks |
+| ------------ | -------------------------- | ---------------------------------------- | ------ | -------------- |
+| `voltcraft`  | OWON R10W, 15-byte LE      | Voltcraft VC800/900 (`com.voltcraft.series800`, OWON iMeter rebadge) | ✅ **live-validated** | Flag order settled (LSB-first). Interactive buttons + value-walk + HOLD all on-screen. ⚠️ device-card shows a red **"disconnected"** badge even while live data flows — app quirk, does NOT block the reading. |
+| `owon-plus`  | OWON 6-byte binary (R2W)   | OWON **iMeter** (`com.owon.imeter`)       | ✅ **live-validated** + real-HW corroborated | The OWON workhorse. Confirmed against a physical **B35T+**. The "+" meters (B35T+/B41T+) are this binary format. Use **iMeter** (writes the CCCD), not BLE4.0. |
+| `owon-old`   | OWON 14-byte ASCII (B35)   | OWON BLE4.0 (`com.owon.MultimeterBLE`)    | ⚠️ **byte-verified, LEGACY** | 31/31 round-trip green, but no live oracle and no real hardware exists in the wild — every real meter is binary. **Flagged for likely removal** (see its module docstring). |
+| `bdm`        | YSCoCo XOR-scrambled       | **Bluetooth DMM** (`com.yscoco.wyboem`), AN9002 | ✅ **live-validated** | Needed a device-type-byte fix (descrambled `byte[2]=0x03`, AB_300) to render the right unit. Advert name must be **exactly** `Bluetooth DMM` or `ZY`. |
+| `ai-care`    | AiCare self-addressing (FFB0) | INTELLIGENT MULTIMETER (`aicare.net.cn.iMultimeter`) | ✅ **live-validated** | Scan gate is **manufacturer-data, not name** — the emulator advertises `AC FF <mac-reversed>` so the app lists it (see below). The big readout only updates **after you tap the green "Start" button** in the app. |
+| `uni-t`      | UNI-T AB-CD, 19-byte (polled) | UNI-T **Smart Measure** (`com.uni_t.multimeter`), as UT60BT | ✅ **live-validated** | Handshake-then-stream. Needed a range-index unit fix (range 0 = mV, not V). Advert name must be **exactly** a supported model (e.g. `UT60BT`). |
+| `ut202bt`    | UNI-T (shares `uni_t.encode`) | Smart Measure                          | 🟡 **inherits uni-t fix** | Same encoder as `uni-t`, so it inherits the range fix; not separately put on-screen. |
+| `ut117c`     | UNI-T 16-bit-len encoder   | Smart Measure                            | 🟡 **byte-verified** | Own encoder; per-model unit/range sweep against its app still owed. |
+| `ut171`      | UNI-T 16-bit-len encoder   | Smart Measure                            | 🟡 **byte-verified** | Own encoder; not live-swept. |
+| `ut181a`     | UNI-T 16-bit-len encoder   | Smart Measure                            | 🟡 **byte-verified, partial** | MAIN value block only; secondary block + datalog deferred (need a HW capture). |
+| `ut219p`     | UNI-T 16-bit-len encoder   | Smart Measure                            | 🟡 **byte-verified, partial** | Standard live-data frame only; `daoPos`→param dispatch + battery-gate handshake deferred. |
+
+**Tests: `262 passed`** — encoder round-trips through per-profile decoder ports,
+the FFF1 auth math, the interactive reactions, the meter-core engine, and the
+unsolicited-injection PDU layout.
 
 ## Install
 
@@ -59,169 +86,170 @@ bluetoothctl list       # should list your controller
 python -m fakemeter --profile voltcraft --adapter hci0
 ```
 
-This publishes a GATT service `0xFFF0` (notify `0xFFF4`, write `0xFFF3`, secure
-`0xFFF1`) and starts advertising as **`VC900-FAKE`**. You then get a keyboard menu:
+Pick any profile id from the table above with `--profile`. The OWON family
+publishes GATT service `0xFFF0` (notify `0xFFF4`, write `0xFFF3`, secure `0xFFF1`,
+info `0xFFF2`); UNI-T uses the ISSC `49535343-…` service; ai-care uses `0xFFB0`.
+
+You then get a keyboard REPL:
 
 ```
   p   list + play a preset pattern
-  s   start the MODE-WORD BIT SWEEP   (the flag-order test — see below)
   v   set a live reading (value / function / prefix)
   f   toggle an annunciator flag (hold/rel/auto/bat/min/max)
   r   re-send the current frame
+  raw <hexbytes>   inject an arbitrary frame (the byte-mapping tool)
+  s   start the MODE-WORD BIT SWEEP   (the flag-order test — voltcraft)
+  series <id> / auth <mode> / walk on|off
   ?   help     q   quit
 ```
 
 Flags:
 
 - `--adapter hciN` — which BlueZ adapter (default `hci0`). Also accepts a BD address.
-- `--name NAME` — override the advertised local name (default per profile).
+- `--name NAME` — override the advertised local name. **Many vendor apps filter
+  the scan list by exact model name** (see "Exact-name scan filters" below), so the
+  per-profile `*-FAKE` default will not list in those apps — pass the real model name.
 - `--self-check` — publish, verify advertisement + GATT registered, run encoder
-  round-trips, then exit. No phone needed. Use this to confirm the host is sane.
+  round-trips, then exit. No phone needed; confirms the host is sane.
+- `--no-walk` — disable the demo value drift (fixed reading, for precise byte-mapping).
+- `--no-unsolicited` — disable the raw-HCI no-CCCD injection path (stream profiles).
 - `-v` — debug logging (logs every notify / write, including the FFF1 challenge).
 
-### Preset patterns (`p`)
+## How a phone-side check goes
 
-| preset            | what the phone should show                         |
-| ----------------- | -------------------------------------------------- |
-| `dc_volts`        | `4.200 V` DC                                       |
-| `resistance_kohm` | `1.000 kΩ`                                          |
-| `current_ua`      | `12.30 µA` DC                                       |
-| `overload`        | `O.L` (overload, AC volts)                          |
-| `negative`        | `-0.512 V` DC                                       |
-| `bitsweep`        | the mode-word bit sweep (below)                    |
+1. Start the tool on the target profile (advertise the **exact** model name the
+   app expects — see below).
+2. On the phone, open the vendor app (or our Web-Bluetooth app / nRF Connect).
+3. Connect to the advertised device; it should immediately show the initial
+   reading (default `4.200 V DC`).
+4. Play presets (`p`), set values (`v 230.5 V`), toggle flags (`f hold`) — confirm
+   each renders correctly. Changing the value on-screen proves it's genuinely live,
+   not a static template. Use `raw <hexbytes>` to map any byte/bit to the display.
 
-## The mode-bit sweep — the flag-order question (READ THIS)
+## Cross-cutting mechanisms & gotchas
 
-The driver's `voltcraft.ts` currently reads the mode-flags word (`bytes[12..13]`)
-**MSB-first** (`hold=bit15, rel=bit14, auto=bit13, lowBattery=bit12, min=bit11,
-max=bit10`). The sibling `owon-plus` driver had the **identical** bug and was
-corrected to **LSB-first** (`hold=bit0 … max=bit5`). We strongly suspect voltcraft
-has the same reversed-flag bug, but it has never been proven on hardware.
+These bit every OWON/Java-app validation and are the hard-won part of the project.
 
-`fakemeter` settles it. Run the sweep (menu `s`, or play preset `bitsweep`): it
-emits a stable **4.200 V DC** base reading and toggles **exactly one** mode-word
-bit at a time, walking bits 0..15. For each step, read the phone and note which
-annunciator (HOLD / REL / AUTO / battery / MIN / MAX, or none) lights up. That map
-is definitive:
+### The CCCD wall (and the no-CCCD injection workaround)
+A bluezero/BlueZ peripheral only emits notifications to a client that **subscribed
+via the 0x2902 CCCD**. Some apps don't write it:
+- **Newer/Flutter apps write the CCCD** → normal BlueZ path works: Voltcraft
+  series800, OWON **iMeter**, UNI-T Smart Measure, Bluetooth DMM, ai-care, nRF.
+- **The OWON BLE4.0 *Java* app NEVER writes the CCCD for FFF4** (vestigial sample
+  code only writes it for the heart-rate UUID) — it relies on the real chip emitting
+  *unsolicited* notifications. BlueZ won't route to that link, so the app sits on
+  "No input".
 
-- If **bit 0 → HOLD, bit 1 → REL, … bit 5 → MAX**, the order is **LSB-first** and
-  `voltcraft.ts` is **wrong** (needs the same fix as commit `4506bdc` did for
-  owon-plus).
-- If **bit 15 → HOLD, bit 14 → REL, …**, the driver's current MSB-first order is
-  right after all.
+`fakemeter/unsolicited.py` solves this at the delivery layer: it injects ATT
+Handle-Value-Notification PDUs **directly onto the ACL link via a raw HCI socket**,
+bypassing BlueZ's CCCD gate — exactly like a real meter chip. On by default for
+stream profiles (`--no-unsolicited` to disable); the moment a real CCCD write lands
+it stops and BlueZ's path takes over, so well-behaved apps are unaffected. The
+mechanism is **proven over-air** (no-CCCD notification displayed on nRF). It
+**requires `CAP_NET_RAW`** to deliver: `sudo setcap cap_net_raw+ep "$(readlink -f .venv/bin/python)"`.
 
-You can step the sweep manually (press ENTER per bit) or give an auto interval in
-seconds. Tell Claude, for each bit number, which annunciator lit — that resolves
-the driver bug.
+### Dual-mode BR/EDR wall (OWON apps)
+The OWON apps `connectGatt(AUTO)`; a dual-mode `hci0` makes Android connect over
+Bluetooth *Classic* and auto-bond, blocking LE GATT. Fix: make the adapter LE-only
+(`sudo btmgmt --index 0 bredr off`, reversible) **and** clear the phone's cached
+device record so AUTO re-resolves to LE.
 
-## Drive the phone-side check
+### Scan filters (each app gates differently)
+Several vendor apps' add/scan screens filter what they'll list — the *model
+identity* lives in the frame, not the advert name:
+- **Bluetooth DMM** lists only devices named exactly `Bluetooth DMM` or `ZY` (the
+  AN9002 identity is the device-type byte `0x03`, not the name).
+- **UNI-T Smart Measure** matches `equalsIgnoreCase` against its supported-model set
+  (`UT60BT`, `UT202BT`, `UT219P`, `UT117C`, …) — `UT60BT-FAKE` is filtered out.
+- **ai-care INTELLIGENT MULTIMETER** ignores the name entirely and gates on
+  **advertised manufacturer-specific data**: it lists a device only if the advert
+  carries service `FFB0` **and** a manufacturer field `AC FF <device-MAC reversed>`.
+  The `ai-care` profile advertises this automatically (via a `manufacturer_data`
+  advert hook), so any `--name` works.
 
-1. Start the tool: `python -m fakemeter --profile voltcraft --adapter hci0`.
-2. On the phone, open **either** the vendor app ("Voltcraft VC800 VC900 Series" /
-   the OWON multimeter app) **or** our Web-Bluetooth web app.
-3. Connect to the advertised device **`VC900-FAKE`** (service `0xFFF0`).
-4. It should immediately show **`4.200 V DC`** (the initial frame).
-5. Press `p` and play the presets — confirm each renders as the table above says.
-6. Press `s` and run the **mode-bit sweep**; record which annunciator lights per
-   bit. This is the key result.
+So advertise the real model name with `--name`, not the `*-FAKE` default.
 
-If the vendor app shows **nothing** until something happens on `0xFFF1`, that's the
-anti-counterfeit gate — see below; it is auto-answered, and `-v` logs the exchange.
+### FFF1 MD5 anti-counterfeit auth (OWON family)
+OWON meters gate the app UI on an MD5 *identity* challenge on `FFF1`: the app writes
+6 "mixed coordinate" bytes, then reads back the meter's response. `fakemeter`
+reproduces the responder (`auth_table="vc"`, default) — recover `orig = mixed -
+[200,100,50,20,10,5]`, map through the app's `s1[]`/`s2[]` char tables, and return
+the **16 raw MD5 digest bytes** (the app hex-encodes them itself; returning ASCII
+hex double-hexes and fails). Confirmed live against both the Java and Flutter apps.
 
-## Two radios / two instances
+### Interactive control buttons (FFF3)
+Pressing a meter-screen button writes `[opcode, 0x01]` to FFF3; the emulator mutates
+the streamed reading and the app's display follows. Hold/Select/AC-DC/Rel/Max-Min/
+LPF/Range are all implemented and verified on-screen for voltcraft.
 
-The design is fully instance-scoped — the adapter is threaded through, no globals —
-so when a second BLE dongle is present you can run a **second** independent
-emulator on it:
+### Value-walk demo drift
+On by default: the streamed numeric reading gently drifts each stream tick (jitter +
+mean-reversion toward the nominal) so it feels live. Freezes under HOLD. `--no-walk`
+or REPL `walk off` pins it for precise byte-mapping.
 
-```bash
-# terminal 1
-python -m fakemeter --profile voltcraft --adapter hci0 --name VC900-FAKE-A
-# terminal 2 (requires a second adapter present as hci1)
-python -m fakemeter --profile voltcraft --adapter hci1 --name VC900-FAKE-B
-```
+## The voltcraft flag-order question — SETTLED
 
-This is **documented config, not yet exercised** — only one adapter (`hci0`) is
-present on this machine, so two-radio operation has not been run here.
-
-## The FFF1 auth gate (anti-counterfeit)
-
-OWON-family meters expose an `FFF1` "secure" characteristic with an MD5 *identity*
-challenge. Our drivers ignore it (the meter free-streams on `FFF4` regardless), but
-the **app may gate its UI** on it. `fakemeter` implements the responder, recovered
-from the decompiled OWON "OWON Multimeter BLE4.0" Java app
-(`com.lilliput.Multimeter.ble.encrypt.{BleClientIdentityVerify, UseMd5, MD5For32}`):
-
-1. The app **writes** 6 "mixed coordinate" bytes to `FFF1` (each byte =
-   `original_coord[i] + mixElems[i]`, `mixElems = [200,100,50,20,10,5]`; sometimes
-   padded to 16 bytes).
-2. The app **reads** `FFF1`. The meter (us) must reply with the **uppercase MD5
-   hex** (32 ASCII chars) of a string built by *recovering* the original
-   coordinate (`orig = mixed - mixElems`) and mapping each coordinate through the
-   app's char tables `s1[]` (indices 0..2) / `s2[]` (indices 3..5).
-3. The app computes the same MD5 itself and compares; on match it shows its UI.
-
-`fakemeter` reproduces step 2 exactly, so a genuine-looking response is returned
-automatically. **Every write to `FFF1`/`FFF3` is logged** (run with `-v`), so if a
-particular app build deviates, you'll see the actual challenge bytes and can adapt
-the responder. The auth math is unit-tested
-(`tests/test_voltcraft_encoder.py::test_auth_response_matches_app_computation`).
-
-> Caveat: the challenge/response scheme is confirmed against the **Java** OWON app.
-> The Flutter rebadge (`com.voltcraft.series800`) uses an `encryptByMD52`/
-> `generateMd5` path with the same intent; if that app rejects the response, capture
-> the `FFF1` write with `-v` and send it over — the responder can be tuned from the
-> observed bytes.
+The driver's `voltcraft.ts` read the mode-flags word **MSB-first**. The live
+bit-sweep (menu `s`) on the real app settled it: the state word is a straight
+**LSB-numbered bitmask** with **HOLD = bit0** (then REL=1, AUTO=2, Bat=3, MIN=4,
+MAX=5, …). The driver's MSB-first read is **wrong** — flags must be read LSB-first,
+matching the same fix already applied to the sibling `owon-plus`. Full confirmed
+R10W layout is in `docs/PROGRESS.md` and `docs/voltcraft-measurement-protocol.md`.
 
 ## Tests
 
 ```bash
 . .venv/bin/activate
-pytest -q
+pytest -q        # 262 passed
 ```
 
-`tests/` round-trips readings through the encoder and a minimal Python port of the
-voltcraft *decoder* (`tests/decode_voltcraft.py`), asserting value / unit / decimal
-point / sign survive. **Flags are deliberately NOT asserted** in the round trip —
-the MSB-vs-LSB flag order is the very thing the phone sweep settles, so the tests
-only confirm the encoder is self-consistent with its chosen LSB-first orientation.
+Each profile round-trips readings through its encoder and a minimal Python port of
+the matching decoder (`tests/decode_*.py`), asserting value / unit / decimal point /
+sign survive, plus the FFF1 auth math, the interactive reactions, the meter-core
+engine, and the unsolicited-injection PDU byte layout.
+
+## Two radios / two instances
+
+The design is fully instance-scoped (the adapter is threaded through, no globals),
+so with a second BLE dongle you can run a second independent emulator on `hci1`.
+Documented config, exercised lightly — only one adapter is usually present here.
 
 ## Privilege / D-Bus notes
 
 - The GATT server + advertisement **register fine as a normal user** on this host
-  (BlueZ 5.72) — no root, no custom D-Bus policy file needed. `bluetoothctl`
-  already works for the user, i.e. user-level D-Bus access to BlueZ exists.
-- `--self-check` confirms registration via BlueZ's
-  `org.bluez.LEAdvertisingManager1.ActiveInstances` property (it reads `1` while
-  running, `0` after exit — the tool cleans up its advertisement on quit).
-- **`btmon`** (raw HCI monitor, to sniff the actual advertising PDUs on air)
-  **does need root** here (`Failed to bind channel: Operation not permitted` as a
-  user). It was **not** run during development because passwordless sudo is not
-  available and the task forbids silent system changes. If you want an on-air
-  capture, run `sudo btmon` in another terminal while the tool advertises. The
-  emulator itself needs no such privilege.
+  (BlueZ 5.72) — `bluetoothctl` already works for the user. `--self-check` confirms
+  registration via `LEAdvertisingManager1.ActiveInstances`.
+- **`CAP_NET_RAW`** is needed only for the no-CCCD raw-HCI injection path (above)
+  and for `btmon` on-air capture. The emulator's normal (CCCD) path needs no extra
+  privilege.
+- **Persistence gotcha**: the Claude/agent harness SIGKILLs (exit 144) any
+  bluez/D-Bus process it spawns when the spawning call returns. For long-lived live
+  runs, launch outside the harness (a real terminal, `screen`, or `setsid … &
+  disown` which reparents under `systemd --user` so it survives). Drive a detached
+  instance via a FIFO and read its `tee` logfile.
+- **Bond-clear on restart**: restarting the emulator invalidates a phone's stored
+  LTK ("Couldn't pair / incorrect PIN"). Clear the bond on **both** sides first
+  (`bluetoothctl remove <phone-addr>` + toggle the phone's Bluetooth) then re-add.
 
-## Status / what's verified
+## Further docs
 
-Verified here, hardware-free:
+- `docs/PROGRESS.md` — full chronological log: every profile's validation session,
+  the protocol analysis, and the open items.
+- `docs/adding-a-profile.md` — the add-a-profile template + the layering map
+  (`base` → `meter_core` → `owon_base`/`uni_t_base` → per-model).
+- `docs/voltcraft-measurement-protocol.md`, `docs/owon-voltcraft-handshake.md` —
+  the confirmed R10W frame + the FFF1/FFF2 handshake.
 
-- ✅ Adapter resolves (`hci0` → `44:AF:28:A5:53:1A`); GATT app + LE advertisement
-  **register as a normal user**; `LEAdvertisingManager1.ActiveInstances = 1` while
-  running; advertised `LocalName = VC900-FAKE`, `ServiceUUIDs = [0xFFF0]`.
-- ✅ All three characteristics export with correct UUIDs/flags (FFF4 notify, FFF3
-  write, FFF1 secure).
-- ✅ Notify push round-trips into the characteristic Value.
-- ✅ Encoder round-trip tests pass (value / unit / decimal point / sign), 20 tests.
-- ✅ FFF1 MD5 auth responder reproduces the OWON Java app's own computation
-  (unit-tested) — but only **stub-level confidence** against the Flutter rebadge.
+## Status summary
 
-Not yet verified (needs the phone / extra hardware):
-
-- ⬜ **The mode-bit-sweep flag order** — the whole point. Needs a phone.
-- ⬜ Whether any specific app **gates its UI on FFF1** and accepts our response.
-- ⬜ Two-radio operation (only one adapter present).
-- ⬜ On-air advertising PDU capture via `btmon` (needs root).
-- ⬜ The 15-byte dual-display framing / secondary block / `0xF0` markers as the app
-  actually parses them (the driver's framing is inferred from a C# port; the OWON
-  app symbols didn't corroborate a dual-display parser).
-```
+- ✅ **Live-validated on the real vendor app**: `voltcraft`, `owon-plus`
+  (+ real B35T+ hardware), `bdm` (as AN9002), `uni-t` (as UT60BT), `ai-care`
+  (INTELLIGENT MULTIMETER).
+- 🟡 **Byte-verified, not yet on-screen**: `ut202bt` (inherits uni-t),
+  `ut117c`/`ut171`/`ut181a`/`ut219p` (own encoders, per-model app sweep owed;
+  ut181a/ut219p are partial-frame).
+- ⚠️ **Legacy**: `owon-old` — byte-correct but no live oracle / no real hardware;
+  flagged for likely removal.
+- The driver-repo fixes this surfaced (voltcraft R10W rewrite + LSB flag order,
+  owon-old byte6/nano, bdm AB_300) live on a branch in `uni-t-mmu-ble`, pending
+  review/merge.

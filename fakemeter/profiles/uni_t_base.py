@@ -4,8 +4,8 @@ This is to the UNI-T family what ``owon_base`` is to the OWON family: everything
 the UNI-T meters share, so a per-model profile supplies only its measurement
 encoder + a tiny config. The UNI-T family is ``interaction='polled'`` — there is NO
 free-stream-on-subscribe — but it is NOT reply-one-frame-per-write. The corrected
-model (verified against the driver ``uni-t.ts`` + the decompiled UNI-T Smart Measure
-app, ``com.uni_t.multimeter`` ``BleManager``/``com.inuker`` BLE lib) is
+model (verified against the ``uni-t.ts`` driver + confirmed live with the UNI-T Smart
+Measure app, ``com.uni_t.multimeter`` ``BleManager``/``com.inuker`` BLE lib) is
 **handshake-then-stream**:
 
   1. App subscribes (the inuker lib WRITES the 0x2902 CCCD — see the report; this is

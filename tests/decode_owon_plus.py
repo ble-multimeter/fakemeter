@@ -2,7 +2,7 @@
 
 ORACLE for the owon-plus profile's encoder: a faithful re-implementation of
 ``decodeOwonPlus`` from ``uni-t-mmu-ble/packages/protocol/src/drivers/owon-plus.ts``
-(byte-verified against the OWON BLE4.0 Android app ``handleReceivedData_common``).
+(confirmed by live analysis against the OWON BLE4.0 Android app).
 If ``encode(reading) -> bytes -> decode(bytes)`` reproduces the value / unit /
 decimal / sign / OL-UL / flags, the encoder matches the driver's parser.
 

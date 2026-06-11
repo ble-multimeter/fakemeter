@@ -114,15 +114,15 @@ TIMESYNC_PREFIX = b"#TIMEsync"
 # The legacy ASCII-hex variants remain selectable for regression testing.
 # ---------------------------------------------------------------------------
 _MIX_ELEMS = [200, 100, 50, 20, 10, 5]
-# s1[] verbatim from UseMd5.java (coordinate indices 0..2):
+# s1[] (coordinate indices 0..2):
 _S1 = ['z', 'y', 'x', '0', 'w', 'v', '1', 'u', 't', 's', '2', 'r', 'q', '3', 'p',
        'o', 'n', '4', 'm', 'l', '5', 'k', 'j', 'i', '6', 'h', 'g', '7', 'f', 'e',
        'd', '8', 'c', 'b', '9', 'a']
-# s2[] verbatim from UseMd5.java (coordinate indices 3..5):
+# s2[] (coordinate indices 3..5):
 _S2 = ['a', 'b', '9', 'c', 'd', 'e', '8', 'f', 'g', '7', 'h', 'i', 'j', '6', 'k',
        'l', '5', 'm', 'n', 'o', '4', 'p', 'q', '3', 'r', 's', 't', '2', 'u', 'v',
        '1', 'w', 'x', 'y', '0', 'z']
-# base36 alphabet — found verbatim in the VC Flutter binary; historic wrong guess.
+# base36 alphabet — a historic wrong guess at the pickout table.
 _BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 

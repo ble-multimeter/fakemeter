@@ -2,7 +2,7 @@
 
 ORACLE for the owon-old profile's encoder: a re-implementation of ``decodeOwonOld``
 from ``uni-t-mmu-ble/packages/protocol/src/drivers/owon-old.ts``, cross-checked
-against the OWON BLE4.0 Android app ``handleReceivedData_B35``.
+against the OWON BLE4.0 Android app's B35 ASCII decode.
 
 ONE DELIBERATE DEVIATION FROM THE DRIVER: the nano ('n') prefix. The driver reads
 it from ``byte10 bit2 && byte9 == 0`` (owon-old.ts:142) — a known bug (it works for
@@ -42,8 +42,9 @@ def decode_owon_old(frame: bytes) -> Decoded:
 
     text = "-" if frame[0] == SIGN_MINUS else ""
 
-    # Decimal-point — APP-TRUE decode (decompiled handleReceivedData_B35): byte6 is
-    # an ASCII digit selecting the #decimals, NOT the driver's first-set-bit bitmask.
+    # Decimal-point — APP-TRUE decode (matches the OWON app's B35 ASCII decode,
+    # confirmed live): byte6 is an ASCII digit selecting the #decimals, NOT the
+    # driver's first-set-bit bitmask.
     #   byte6 == '1' (0x31) -> 3 dp ; '2' (0x32) -> 2 dp ; '4' (0x34) -> 1 dp ; else 0.
     # (owon-old.ts decodes byte6 as a bitmask, which disagrees with the real meter —
     # a driver bug surfaced by the live validation. This oracle matches the APP so the
